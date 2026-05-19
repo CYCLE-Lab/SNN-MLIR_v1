@@ -11390,7 +11390,7 @@ def ONNXMHAOp:ONNX_Op<"MHA",
 // ════════════════════════════════════════════════════════════════
 
 def ONNXLIFOp : ONNX_Op<"LIF",
-    [Pure]> {
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
 
   let summary = "Leaky Integrate-and-Fire neuron (custom SNN op, hidden current state)";
 
@@ -11461,6 +11461,14 @@ def ONNXLIFOp : ONNX_Op<"LIF",
       "FloatAttr":$tau_vi
     )>
   ];
+  let extraClassDefinition = [{
+    onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+        onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+      onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXUnimplementedOpShapeHelper(op, oper, ieb, scope);
+      assert(sh && "failed to allocate shape helper");
+      return sh;
+    }
+  }];
 }
 
 
@@ -11468,7 +11476,7 @@ def ONNXLIFOp : ONNX_Op<"LIF",
 // ONNXMultiStepLIFOp — 多步时序 LIF
 // ════════════════════════════════════════════════════════════════
 
-def ONNXMultiStepLIFOp : ONNX_Op<"MultiStepLIF", [Pure]> {
+def ONNXMultiStepLIFOp : ONNX_Op<"MultiStepLIF", [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
   let summary = "Multi-step Leaky Integrate-and-Fire neuron, iterating over T dimension.";
 
   let description = [{
@@ -11510,6 +11518,14 @@ def ONNXMultiStepLIFOp : ONNX_Op<"MultiStepLIF", [Pure]> {
       "FloatAttr":$tau_vi
     )>
   ];
+  let extraClassDefinition = [{
+    onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+        onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+      onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXUnimplementedOpShapeHelper(op, oper, ieb, scope);
+      assert(sh && "failed to allocate shape helper");
+      return sh;
+    }
+  }];
 }
 
 
@@ -11517,7 +11533,7 @@ def ONNXMultiStepLIFOp : ONNX_Op<"MultiStepLIF", [Pure]> {
 // ONNXDataToVectorOp — 硬件输入打包算子
 // ════════════════════════════════════════════════════════════════
 
-def ONNXDataToVectorOp : ONNX_Op<"DataToVector", [Pure]> {
+def ONNXDataToVectorOp : ONNX_Op<"DataToVector", [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
   let summary = "Pack sparse spike indices into hardware-friendly bit vectors.";
 
   let description = [{
@@ -11542,6 +11558,14 @@ def ONNXDataToVectorOp : ONNX_Op<"DataToVector", [Pure]> {
     // output_vector: 打包后的位向量 (B, N/32)
     AnyTypeOf<[AnyMemRef, AnyTensor]>:$output_vector
   );
+  let extraClassDefinition = [{
+    onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+        onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+      onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXUnimplementedOpShapeHelper(op, oper, ieb, scope);
+      assert(sh && "failed to allocate shape helper");
+      return sh;
+    }
+  }];
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -11582,7 +11606,7 @@ def ONNXDataToVectorOp : ONNX_Op<"DataToVector", [Pure]> {
 //     AnyTypeOf<[AnyMemRef, AnyTensor]>:$x
 //   );
 // }
-def ONNXSNNFCOp : ONNX_Op<"SNNFC", [Pure]> {
+def ONNXSNNFCOp : ONNX_Op<"SNNFC", [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
   let summary = "Spiking Fully Connected layer (hardware current accumulation with two weight banks).";
 
   let description = [{
@@ -11632,13 +11656,21 @@ def ONNXSNNFCOp : ONNX_Op<"SNNFC", [Pure]> {
   let results = (outs
     AnyTypeOf<[AnyMemRef, AnyTensor]>:$x
   );
+  let extraClassDefinition = [{
+    onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+        onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+      onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXUnimplementedOpShapeHelper(op, oper, ieb, scope);
+      assert(sh && "failed to allocate shape helper");
+      return sh;
+    }
+  }];
 }
 
 //===----------------------------------------------------------------------===//
 // ONNX SConvOp
 //===----------------------------------------------------------------------===//
 
-def ONNXSConvOp:ONNX_Op<"SConv", [Pure]> {
+def ONNXSConvOp:ONNX_Op<"SConv", [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
   let summary = "Spiking convolution operation";
   let description = [{
     SConv is a dedicated convolution op for SNN models. It keeps the same
@@ -11678,6 +11710,14 @@ def ONNXSConvOp:ONNX_Op<"SConv", [Pure]> {
         return {30};
       }
     }];
+    let extraClassDefinition = [{
+      onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+          onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+        onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXConvOpShapeHelper(op, oper, ieb, scope);
+        assert(sh && "failed to allocate shape helper");
+        return sh;
+      }
+    }];
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -11689,7 +11729,7 @@ def ONNXSConvOp:ONNX_Op<"SConv", [Pure]> {
 // ════════════════════════════════════════════════════════════════
 
 def ONNXIFOp : ONNX_Op<"IF",
-    [Pure]> {
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
 
   let summary = "Integrate-and-Fire neuron (no leak, optional initial state)";
 
@@ -11751,6 +11791,14 @@ def ONNXIFOp : ONNX_Op<"IF",
       "FloatAttr":$v_reset
     )>
   ];
+  let extraClassDefinition = [{
+    onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+        onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+      onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXUnimplementedOpShapeHelper(op, oper, ieb, scope);
+      assert(sh && "failed to allocate shape helper");
+      return sh;
+    }
+  }];
 }
 
 
@@ -11758,7 +11806,7 @@ def ONNXIFOp : ONNX_Op<"IF",
 // ONNXMultiStepIFOp — 多步时序 IF (初始状态可选)
 // ════════════════════════════════════════════════════════════════
 
-def ONNXMultiStepIFOp : ONNX_Op<"MultiStepIF", [Pure]> {
+def ONNXMultiStepIFOp : ONNX_Op<"MultiStepIF", [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, DeclareOpInterfaceMethods<ShapeHelperOpInterface>]> {
   let summary = "Multi-step Integrate-and-Fire neuron, iterating over T dimension. Initial state optional.";
 
   let description = [{
@@ -11802,4 +11850,12 @@ def ONNXMultiStepIFOp : ONNX_Op<"MultiStepIF", [Pure]> {
       "FloatAttr":$v_reset
     )>
   ];
+  let extraClassDefinition = [{
+    onnx_mlir::ONNXOpShapeHelper * $cppClass::getShapeHelper(mlir::Operation *op, llvm::ArrayRef<mlir::Value> oper, 
+        onnx_mlir::IndexExprBuilder *ieb, onnx_mlir::IndexExprScope *scope) {
+      onnx_mlir::ONNXOpShapeHelper *sh = new onnx_mlir::ONNXUnimplementedOpShapeHelper(op, oper, ieb, scope);
+      assert(sh && "failed to allocate shape helper");
+      return sh;
+    }
+  }];
 }
