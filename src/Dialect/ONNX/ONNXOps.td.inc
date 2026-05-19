@@ -11633,3 +11633,173 @@ def ONNXSNNFCOp : ONNX_Op<"SNNFC", [Pure]> {
     AnyTypeOf<[AnyMemRef, AnyTensor]>:$x
   );
 }
+
+//===----------------------------------------------------------------------===//
+// ONNX SConvOp
+//===----------------------------------------------------------------------===//
+
+def ONNXSConvOp:ONNX_Op<"SConv", [Pure]> {
+  let summary = "Spiking convolution operation";
+  let description = [{
+    SConv is a dedicated convolution op for SNN models. It keeps the same
+    convolution parameters as onnx.Conv so that the lowering pipeline can
+    reuse the existing convolution shape inference and Krnl lowering logic,
+    while still giving the model a distinct op name for SNN-specific passes.
+  }];
+
+  let arguments = (ins AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$X,
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$W,
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, NoneType]>:$B,
+    DefaultValuedStrAttr<StrAttr, "NOTSET">:$auto_pad,
+    OptionalAttr<I64ArrayAttr>:$dilations,
+    DefaultValuedAttr<SI64Attr, "1">:$group,
+    OptionalAttr<I64ArrayAttr>:$kernel_shape,
+    OptionalAttr<I64ArrayAttr>:$pads,
+    OptionalAttr<I64ArrayAttr>:$strides);
+  let results = (outs AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$Y);
+  let builders = [
+    OpBuilder<(ins "Value":$X, "Value":$W, "Value":$B, "StringAttr":$auto_pad, "ArrayAttr":$dilations, "IntegerAttr":$group, "ArrayAttr":$kernel_shape, "ArrayAttr":$pads, "ArrayAttr":$strides), [{
+      auto resultType = UnrankedTensorType::get(mlir::cast<ShapedType>(X.getType()).getElementType());
+      build($_builder, $_state, resultType, X, W, B, auto_pad, dilations, group, kernel_shape, pads, strides);
+    }]>,
+    OpBuilder<(ins "ValueRange":$operands, "ArrayRef<NamedAttribute>":$attributes), [{
+      auto resultType = UnrankedTensorType::get(mlir::cast<ShapedType>(operands[0].getType()).getElementType());
+      build($_builder, $_state, {resultType}, operands, attributes);
+    }]>
+    ];
+    let extraClassDeclaration = [{
+      static int getNumberOfOperands() {
+        return 3;
+      }
+      static int getNumberOfResults() {
+        return 1;
+      }
+      static std::vector<int> getTypeMap() {
+        return {30};
+      }
+    }];
+}
+
+// ════════════════════════════════════════════════════════════════
+// ONNXIFOp — 2输入(其中1个可选) / 2输出版本
+//
+// 与前一版的区别：
+//   - 输入 v 变为可选 (Optional)
+//   - 若 v 未提供，默认膜电位 = 全零张量 (形状同 x)
+// ════════════════════════════════════════════════════════════════
+
+def ONNXIFOp : ONNX_Op<"IF",
+    [Pure]> {
+
+  let summary = "Integrate-and-Fire neuron (no leak, optional initial state)";
+
+  let description = [{
+    Single-step IF neuron. The membrane potential v simply accumulates the
+    input x each time step. No leak, no current dynamics.
+
+    State shape: v = (B, N)   (no hidden current)
+    Input x    : (B, N)
+
+    Update equations:
+      v_new  = v + x          // if v not provided, v is all-zero
+      spike  = (v_new > v_th) ? 1 : 0
+      v_next = spike ? v_reset : v_new
+
+    If the optional input `v` is not given, the initial membrane potential
+    defaults to a tensor of zeros with the same shape as `x`.
+
+    Attributes:
+      v_th_f    (float): firing threshold
+      v_reset_f (float): reset potential after spike (default 0.0)
+  }];
+
+  // ── 输入：2个（其中 v 可选） + 2个属性 ─────────────────────
+  let arguments = (ins
+    // x          : 突触输入电流 (B, N)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$x,
+
+    // v          : 膜电位 (B, N) — 当前时间步的初始膜电位 (可选)
+    Optional<AnyTypeOf<[AnyMemRef, AnyTensor]>>:$v,
+
+    DefaultValuedAttr<F32Attr, "1.0">:$v_th,
+    DefaultValuedAttr<F32Attr, "0.0">:$v_reset
+  );
+
+  // ── 输出：2个张量 ───────────────────────────────────────────
+  let results = (outs
+    // spike  : 本步脉冲 0/1  (B, N)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$spike,
+
+    // v_next : 更新后的膜电位 (B, N)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$v_next
+  );
+
+  // ── builder ─────────────────────────────────────────────────
+  // 提供两个方便的构造方式：
+  //   1. 显式传入 v
+  //   2. 省略 v（此时自动传入空值 Value()）
+  let builders = [
+    OpBuilder<(ins
+      "Value":$x,
+      "Value":$v,
+      "FloatAttr":$v_th,
+      "FloatAttr":$v_reset
+    )>,
+    OpBuilder<(ins
+      "Value":$x,
+      "FloatAttr":$v_th,
+      "FloatAttr":$v_reset
+    )>
+  ];
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// ONNXMultiStepIFOp — 多步时序 IF (初始状态可选)
+// ════════════════════════════════════════════════════════════════
+
+def ONNXMultiStepIFOp : ONNX_Op<"MultiStepIF", [Pure]> {
+  let summary = "Multi-step Integrate-and-Fire neuron, iterating over T dimension. Initial state optional.";
+
+  let description = [{
+    Multi-step IF neuron execution. Takes the entire time sequence `x_seq`
+    and processes it internally step-by-step, maintaining membrane potential.
+
+    Input shapes:
+      x_seq   : (T, N)
+      v_init  : (1, N)  [optional, default all-zero]
+    Output shapes:
+      spike_seq : (T, N)
+      v_final   : (1, N)
+
+    If `v_init` is not provided, the initial membrane potential defaults
+    to a tensor of zeros with shape (1, N), where N is inferred from `x_seq`.
+  }];
+
+  let arguments = (ins
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$x_seq,
+    Optional<AnyTypeOf<[AnyMemRef, AnyTensor]>>:$v_init,
+
+    DefaultValuedAttr<F32Attr, "1.0">:$v_th,
+    DefaultValuedAttr<F32Attr, "0.0">:$v_reset
+  );
+
+  let results = (outs
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$spike_seq,
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$v_final
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "Value":$x_seq,
+      "Value":$v_init,
+      "FloatAttr":$v_th,
+      "FloatAttr":$v_reset
+    )>,
+    OpBuilder<(ins
+      "Value":$x_seq,
+      "FloatAttr":$v_th,
+      "FloatAttr":$v_reset
+    )>
+  ];
+}

@@ -965,8 +965,10 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     int64_t xRank  = xType.getRank();
     int64_t vcRank = vcType.getRank();
 
-    if (!((xRank == 2 && vcRank == 2) || (xRank == 4 && vcRank == 4)))
-      return rewriter.notifyMatchFailure(op, "LIF expects x/v_combined rank (2,2) or (4,4)");
+    if (!((xRank == 2 && vcRank == 2) ||
+        (xRank == 4 && (vcRank == 2 || vcRank == 4))))
+      return rewriter.notifyMatchFailure(
+        op, "LIF expects x/v_combined rank (2,2), (4,2), or (4,4)");
 
     // static shape only (per your statement)
     int64_t B = xType.getDimSize(0);
@@ -975,6 +977,8 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     int64_t N = 0;
 
     if (xRank == 2) {
+      if (vcType.getDimSize(0) != B)
+        return rewriter.notifyMatchFailure(op, "2D: v_combined dim0 must equal B");
       N = xType.getDimSize(1);
       int64_t N2 = vcType.getDimSize(1);
       if (N2 != 2 * N)
@@ -984,16 +988,25 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
       H = xType.getDimSize(2);
       W = xType.getDimSize(3);
 
-      int64_t C2 = vcType.getDimSize(1);
-      int64_t H2 = vcType.getDimSize(2);
-      int64_t W2 = vcType.getDimSize(3);
-
-      if (H2 != H || W2 != W)
-        return rewriter.notifyMatchFailure(op, "4D: v_combined H/W must match x H/W");
-      if (C2 != 2 * C)
-        return rewriter.notifyMatchFailure(op, "4D: v_combined must be (B, 2C, H, W)");
-
       N = C * H * W;
+
+      if (vcType.getDimSize(0) != B)
+        return rewriter.notifyMatchFailure(op, "4D: v_combined dim0 must equal B");
+
+      if (vcRank == 2) {
+        int64_t N2 = vcType.getDimSize(1);
+        if (N2 != 2 * N)
+          return rewriter.notifyMatchFailure(op, "4D+2D: v_combined must be (B, 2*C*H*W)");
+      } else {
+        int64_t C2 = vcType.getDimSize(1);
+        int64_t H2 = vcType.getDimSize(2);
+        int64_t W2 = vcType.getDimSize(3);
+
+        if (H2 != H || W2 != W)
+          return rewriter.notifyMatchFailure(op, "4D: v_combined H/W must match x H/W");
+        if (C2 != 2 * C)
+          return rewriter.notifyMatchFailure(op, "4D: v_combined must be (B, 2C, H, W)");
+      }
     }
 
     // hardware batching
@@ -1011,12 +1024,20 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     // alloc output buffers (rank must equal output rank)
     // ---------------------------
     Value spikeBuf, vcNextBuf;
-    if (xRank == 2) {
+    if (spikeResType.getRank() == 2) {
       spikeBuf  = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, N}, spikeElemTy));
-      vcNextBuf = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, 2 * N}, vcNextElemTy));
-    } else {
+    } else if (spikeResType.getRank() == 4) {
       spikeBuf  = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, C, H, W}, spikeElemTy));
+    } else {
+      return rewriter.notifyMatchFailure(op, "spike output rank must be 2 or 4");
+    }
+
+    if (vcNextResType.getRank() == 2) {
+      vcNextBuf = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, 2 * N}, vcNextElemTy));
+    } else if (vcNextResType.getRank() == 4) {
       vcNextBuf = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, 2 * C, H, W}, vcNextElemTy));
+    } else {
+      return rewriter.notifyMatchFailure(op, "v_combined_next output rank must be 2 or 4");
     }
 
     // ---------------------------
@@ -1025,9 +1046,13 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     Value xBuf, vcBuf;
     if (xRank == 2) {
       xBuf  = tensorToMemref(rewriter, loc, x,          MemRefType::get({B, N}, xElemTy));
-      vcBuf = tensorToMemref(rewriter, loc, v_combined, MemRefType::get({B, 2 * N}, vcElemTy));
     } else {
       xBuf  = tensorToMemref(rewriter, loc, x,          MemRefType::get({B, C, H, W}, xElemTy));
+    }
+
+    if (vcRank == 2) {
+      vcBuf = tensorToMemref(rewriter, loc, v_combined, MemRefType::get({B, 2 * N}, vcElemTy));
+    } else {
       vcBuf = tensorToMemref(rewriter, loc, v_combined, MemRefType::get({B, 2 * C, H, W}, vcElemTy));
     }
 
@@ -1051,7 +1076,7 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     };
 
     auto loadVC_V_ByFlatN = [&](OpBuilder &b, Value ib, Value flat_n_i64) -> Value {
-      if (xRank == 2) {
+      if (vcRank == 2) {
         Value nIdx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), flat_n_i64);
         return b.create<memref::LoadOp>(loc, vcBuf, ValueRange{ib, nIdx});
       }
@@ -1060,7 +1085,7 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     };
 
     auto loadVC_I_ByFlatN = [&](OpBuilder &b, Value ib, Value flat_n_i64) -> Value {
-      if (xRank == 2) {
+      if (vcRank == 2) {
         Value cstN = mkI64(b, N);
         Value col_i64 = b.create<arith::AddIOp>(loc, flat_n_i64, cstN);
         Value col_idx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), col_i64);
@@ -1084,7 +1109,7 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     };
 
     auto storeVCNext_V_ByFlatN = [&](OpBuilder &b, Value ib, Value flat_n_i64, Value v_val) {
-      if (xRank == 2) {
+      if (vcNextResType.getRank() == 2) {
         Value nIdx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), flat_n_i64);
         b.create<memref::StoreOp>(loc, v_val, vcNextBuf, ValueRange{ib, nIdx});
         return;
@@ -1094,7 +1119,7 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     };
 
     auto storeVCNext_I_ByFlatN = [&](OpBuilder &b, Value ib, Value flat_n_i64, Value i_val) {
-      if (xRank == 2) {
+      if (vcNextResType.getRank() == 2) {
         Value cstN = mkI64(b, N);
         Value col_i64 = b.create<arith::AddIOp>(loc, flat_n_i64, cstN);
         Value col_idx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), col_i64);
@@ -2745,7 +2770,7 @@ static func::FuncOp getOrCreateConvWrapperToPtr(OpBuilder &builder,
 // 2) Helper: read i64 array attrs (pads/strides/dilations/kernel_shape)
 //===----------------------------------------------------------------------===//
 
-static LogicalResult getI64ArrayAttr(ONNXConvOp op, StringRef name,
+static LogicalResult getI64ArrayAttr(ONNXSConvOp op, StringRef name,
                                     SmallVectorImpl<int64_t> &out) {
   auto arr = op->getAttrOfType<ArrayAttr>(name);
   if (!arr)
@@ -2762,14 +2787,14 @@ static LogicalResult getI64ArrayAttr(ONNXConvOp op, StringRef name,
 }
 
 //===----------------------------------------------------------------------===//
-// 3) Pattern: ONNXConvOp -> func.call intrinsic + linear buffer + copy-back
+// 3) Pattern: ONNXSConvOp -> func.call intrinsic + linear buffer + copy-back
 //===----------------------------------------------------------------------===//
 
-struct ONNXConvOpToKrnlIntrinsicCall final
-    : public OpRewritePattern<ONNXConvOp> {
+struct ONNXSConvOpToKrnlIntrinsicCall final
+    : public OpRewritePattern<ONNXSConvOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(ONNXConvOp op,
+  LogicalResult matchAndRewrite(ONNXSConvOp op,
                                 PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -3536,7 +3561,7 @@ public:
     patterns.add<ONNXMultiStepLIFToKrnlConversion>(ctx);
     patterns.add<ONNXDataToVectorOpToKrnlConversion>(ctx);
     patterns.add<ONNXSNNFCOpToKrnlConversion>(ctx);
-    patterns.add<ONNXConvOpToKrnlIntrinsicCall>(ctx);
+    patterns.add<ONNXSConvOpToKrnlIntrinsicCall>(ctx);
     if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
   }

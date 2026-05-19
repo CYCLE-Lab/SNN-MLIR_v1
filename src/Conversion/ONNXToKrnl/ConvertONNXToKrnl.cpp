@@ -406,7 +406,8 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
 
     // target.addLegalOp<ONNXSoftmaxOp>(); // modified by p
     // target.addLegalOp<ONNXSliceOp>(); // modified by p
-    target.addLegalOp<ONNXConvOp>(); // modified by p
+    // target.addLegalOp<ONNXConvOp>(); // modified by p
+    target.addLegalOp<ONNXSConvOp>();
     // target.addLegalOp<ONNXAddOp>(); // modified by p
     // target.addLegalOp<ONNXSubOp>(); // modified by p
     // target.addLegalOp<ONNXMulOp>(); // modified by p 
@@ -426,6 +427,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     target.addLegalOp<ONNXCustomOp>();
     target.addLegalOp<ONNXDataToVectorOp>();
     target.addLegalOp<ONNXSNNFCOp>();
+    target.addLegalOp<ONNXIFOp>();
   }
 
   // 定义检查函数：判断是否为 normalization/MHA 相关操作

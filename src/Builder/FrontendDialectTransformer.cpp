@@ -1618,6 +1618,8 @@ private:
 #include "src/Builder/OpBuildTable.inc"
   // ── 自定义 SNN op ──────────────────────────────────────────
   import_handler_map_["LIF"] = &FrontendGenImpl::ImportNodeLIF;
+  import_handler_map_["SConv"] = &FrontendGenImpl::ImportNodeSConv;
+  import_handler_map_["IF"] = &FrontendGenImpl::ImportNodeIF;
   import_handler_map_["DataToVector"] = &FrontendGenImpl::ImportNodeDataToVector;
   import_handler_map_["SNNFC"] = &FrontendGenImpl::ImportNodeSNNFC;
   }
@@ -1804,6 +1806,86 @@ void ImportNodeLIF(const onnx::NodeProto &node) {
     frontend_symbols_.AddMapping(node.output(0), lifOp.getSpike());
   if (node.output_size() >= 2 && !node.output(1).empty())
     frontend_symbols_.AddMapping(node.output(1), lifOp.getVCombinedNext());
+}
+
+/*
+ * ImportNodeIF — 2输入(其中1个可选) / 2输出版本
+ *
+ * 与 LIF 的区别：
+ *   - 无电流状态，膜电位直接作为 v 传递（形状 (B,N)）
+ *   - v 为可选输入：若未提供，默认初始化为全零张量
+ *   - 属性仅 v_th_f, v_reset_f
+ *   - 输出 spike (B,N) 和 v_next (B,N)
+ */
+void ImportNodeIF(const onnx::NodeProto &node) {
+  // ── 收集输入：x (必有), v (可选) ──────────────────────────────
+  std::vector<Value> inputs;
+  getNodeInputs(node, inputs);
+  bool hasV = (inputs.size() == 2);
+  // 断言：输入数量必须为 1 或 2
+  assert((inputs.size() == 1 || inputs.size() == 2) &&
+         "IF node expects exactly 1 or 2 inputs: x, [v]");
+
+  // ── 提取两个属性（带默认值兜底）────────────────────────────────
+  float v_th    = 1.0f;
+  float v_reset = 0.0f;
+
+  for (int i = 0; i < node.attribute_size(); ++i) {
+    const auto &attr = node.attribute(i);
+    if      (attr.name() == "v_th_f")    v_th    = attr.f();
+    else if (attr.name() == "v_reset_f") v_reset = attr.f();
+  }
+
+  // ── 构造 MLIR 属性 ─────────────────────────────────────────
+  auto v_th_attr    = builder_.getF32FloatAttr(v_th);
+  auto v_reset_attr = builder_.getF32FloatAttr(v_reset);
+
+  // ── 构造 ONNXIFOp（根据是否有 v 选择 builder 重载）───────
+  ONNXIFOp ifOp;
+  if (hasV) {
+    // 显式提供了初始膜电位 v
+    // Use explicit operands + attributes form to avoid relying on
+    // generated convenience builders (some tablegen configurations
+    // may not produce the expected overloads). Build result types
+    // equal to input type(s).
+    SmallVector<mlir::Type, 2> resultTypes{inputs[0].getType(), inputs[0].getType()};
+    SmallVector<mlir::Value, 2> operands{inputs[0], inputs[1]};
+    SmallVector<mlir::NamedAttribute, 2> attrs;
+    attrs.push_back(builder_.getNamedAttr("v_th", v_th_attr));
+    attrs.push_back(builder_.getNamedAttr("v_reset", v_reset_attr));
+    ifOp = builder_.create<ONNXIFOp>(ImportLoc(node), resultTypes, operands, attrs);
+  } else {
+    // 未提供 v，使用默认全零膜电位
+    SmallVector<mlir::Type, 2> resultTypes{inputs[0].getType(), inputs[0].getType()};
+    SmallVector<mlir::Value, 1> operands{inputs[0]};
+    SmallVector<mlir::NamedAttribute, 2> attrs;
+    attrs.push_back(builder_.getNamedAttr("v_th", v_th_attr));
+    attrs.push_back(builder_.getNamedAttr("v_reset", v_reset_attr));
+    ifOp = builder_.create<ONNXIFOp>(ImportLoc(node), resultTypes, operands, attrs);
+  }
+
+  // ── 绑定两个输出 ───────────────────────────────────────────
+  if (node.output_size() >= 1 && !node.output(0).empty())
+    frontend_symbols_.AddMapping(node.output(0), ifOp.getSpike());
+  if (node.output_size() >= 2 && !node.output(1).empty())
+    frontend_symbols_.AddMapping(node.output(1), ifOp.getVNext());
+}
+
+void ImportNodeSConv(const onnx::NodeProto &node) {
+  std::vector<Value> inputs;
+  getNodeInputs(node, inputs);
+
+  assert((inputs.size() == 2 || inputs.size() == 3) &&
+         "SConv node expects x, w, and optional bias");
+
+  if (inputs.size() == 2)
+    inputs.push_back(builder_.create<ONNXNoneOp>(ImportLoc(node)).getResult());
+
+  auto attributes = ImportNodeAttributes(node);
+
+  int nIn = ONNXSConvOp::getNumberOfOperands();
+  int nOut = ONNXSConvOp::getNumberOfResults();
+  buildOutputAndOperation<ONNXSConvOp>(node, inputs, nIn, nOut, attributes);
 }
 
 /**
