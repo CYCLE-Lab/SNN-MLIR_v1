@@ -1,0 +1,139 @@
+name: GitHub Action
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: onnx-snn-mlir-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Debug
+  BUILD_DIR: ${{ github.workspace }}/build
+  ONNX_MLIR_BUILD_TESTS: ON
+  ONNX_MLIR_ENABLE_STABLEHLO: OFF
+  ONNX_MLIR_ENABLE_WERROR: OFF
+  ONNX_USE_PROTOBUF_SHARED_LIBS: ON
+  PROTOBUF_INSTALL_DIR: ${{ github.workspace }}/protobuf-install
+  LLVM_BUILD_DIR: ${{ github.workspace }}/llvm-project/build
+  MLIR_DIR: ${{ github.workspace }}/llvm-project/build/lib/cmake/mlir
+  PROTOC_BIN: ${{ github.workspace }}/protobuf-install/bin/protoc
+  PROTOBUF_CMAKE_DIR: ${{ github.workspace }}/protobuf-install/lib/cmake/protobuf
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            ca-certificates \
+            gcc \
+            g++ \
+            git \
+            libtool \
+            make \
+            maven \
+            ninja-build \
+            openjdk-11-jdk-headless \
+            python3-dev \
+            python3-pip \
+            python3-setuptools \
+            zlib1g-dev
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip wheel
+          python3 -m pip install -r requirements.txt
+
+      - name: Cache protobuf install
+        id: cache-protobuf
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PROTOBUF_INSTALL_DIR }}
+          key: ${{ runner.os }}-protobuf-21.12
+
+      - name: Build protobuf from source
+        if: steps.cache-protobuf.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          rm -rf protobuf-src "${PROTOBUF_INSTALL_DIR}"
+          git clone -b v21.12 --depth 1 --recursive https://github.com/protocolbuffers/protobuf.git protobuf-src
+          cd protobuf-src
+          ./autogen.sh
+          ./configure --prefix="${PROTOBUF_INSTALL_DIR}" --libdir="${PROTOBUF_INSTALL_DIR}/lib" --enable-static=no
+          make -j"$(nproc)" install
+
+      - name: Cache LLVM build
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_BUILD_DIR }}
+          key: ${{ runner.os }}-llvm-${{ hashFiles('utils/clone-mlir.sh', 'utils/build-mlir.sh') }}
+
+      - name: Clone and build LLVM/MLIR
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          rm -rf llvm-project
+          bash utils/clone-mlir.sh
+          bash utils/build-mlir.sh
+
+      - name: Configure and build onnx-snn-mlir
+        run: |
+          set -euxo pipefail
+          cmake -S . -B "${BUILD_DIR}" -G Ninja \
+            -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+            -DCMAKE_PREFIX_PATH="${PROTOBUF_INSTALL_DIR};${LLVM_BUILD_DIR};${CMAKE_PREFIX_PATH:-}" \
+            -DMLIR_DIR="${MLIR_DIR}" \
+            -DPROTOBUF_DIR="${PROTOBUF_CMAKE_DIR}" \
+            -DProtobuf_PROTOC_EXECUTABLE="${PROTOC_BIN}" \
+            -DONNX_USE_PROTOBUF_SHARED_LIBS="${ONNX_USE_PROTOBUF_SHARED_LIBS}" \
+            -DProtobuf_USE_STATIC_LIBS=OFF \
+            -DPROTOBUF_LIBRARIES="${PROTOBUF_INSTALL_DIR}/lib/libprotobuf.so" \
+            -DPROTOBUF_INCLUDE_DIR="${PROTOBUF_INSTALL_DIR}/include" \
+            -DONNX_MLIR_BUILD_TESTS="${ONNX_MLIR_BUILD_TESTS}" \
+            -DLLVM_LIT_ARGS=-v \
+            -DONNX_MLIR_ENABLE_STABLEHLO="${ONNX_MLIR_ENABLE_STABLEHLO}" \
+            -DONNX_MLIR_ENABLE_WERROR="${ONNX_MLIR_ENABLE_WERROR}"
+          cmake --build "${BUILD_DIR}" --parallel "$(nproc)"
+
+      - name: Run lit tests
+        id: lit_tests
+        continue-on-error: true
+        run: |
+          set +e
+          cmake --build "${BUILD_DIR}" --target check-onnx-lit 2>&1 | tee "${BUILD_DIR}/check-onnx-lit.log"
+          exit ${PIPESTATUS[0]}
+
+      - name: Run unit tests
+        id: unit_tests
+        continue-on-error: true
+        run: |
+          set +e
+          cmake --build "${BUILD_DIR}" --target check-unittest 2>&1 | tee "${BUILD_DIR}/check-unittest.log"
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload test log on failure
+        if: ${{ steps.lit_tests.outcome == 'failure' || steps.unit_tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            ${{ env.BUILD_DIR }}/check-onnx-lit.log
+            ${{ env.BUILD_DIR }}/check-unittest.log
