@@ -39,6 +39,7 @@ add_onnx_mlir_library(OMMlirDialects
   ConvertGpuMemcpyToMemrefCopyPass.cpp
   LowerKrnlGlobal.cpp
   ConvertONNXSNNToKrnl.cpp
+  LowerMemRefReinterpretCast.cpp
 
   DEPENDS
   OMKrnlIncGen

@@ -2792,23 +2792,402 @@ static LogicalResult getI64ArrayAttr(ONNXSConvOp op, StringRef name,
 
 struct ONNXSConvOpToKrnlIntrinsicCall final
     : public OpRewritePattern<ONNXSConvOp> {
+
+// struct ONNXConvOpToKrnlIntrinsicCall final
+//     : public OpRewritePattern<ONNXConvOp> {
+//   using OpRewritePattern::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(ONNXConvOp op,
+//                                 PatternRewriter &rewriter) const override {
+//     Location loc = op.getLoc();
+//     ModuleOp module = op->getParentOfType<ModuleOp>();
+//     declareConvIntrinsicBridge(rewriter, module, loc);
+
+//     // Operands
+//     Value X = op.getX();
+//     Value W = op.getW();
+//     Value B = op.getB();
+
+//     // Types
+//     auto xType = dyn_cast<RankedTensorType>(X.getType());
+//     auto wType = dyn_cast<RankedTensorType>(W.getType());
+//     auto yType = dyn_cast<RankedTensorType>(op.getResult().getType());
+//     if (!xType || !wType || !yType)
+//       return op.emitError("X/W/Y must be RankedTensorType"), failure();
+
+//     if (xType.getRank() != 4 || wType.getRank() != 4 || yType.getRank() != 4)
+//       return op.emitError("Only rank-4 conv supported (NCHW)"), failure();
+
+//     if (!xType.getElementType().isF32() || !wType.getElementType().isF32() ||
+//         !yType.getElementType().isF32())
+//       return op.emitError("Only f32 X/W/Y supported"), failure();
+
+//     // Bias must be none
+//     if (B && !isa<NoneType>(B.getType()))
+//       return op.emitError("Bias is not supported by this lowering"), failure();
+
+//     // Attributes (force group=1)
+//     SmallVector<int64_t, 4> pads, strides, dilations, kernelShape;
+//     if (failed(getI64ArrayAttr(op, "pads", pads)))
+//       return op.emitError("Missing/invalid pads"), failure();
+//     if (failed(getI64ArrayAttr(op, "strides", strides)))
+//       return op.emitError("Missing/invalid strides"), failure();
+
+//     if (failed(getI64ArrayAttr(op, "dilations", dilations)))
+//       dilations.assign({1, 1});
+
+//     if (failed(getI64ArrayAttr(op, "kernel_shape", kernelShape))) {
+//       int64_t KH = wType.getDimSize(2);
+//       int64_t KW = wType.getDimSize(3);
+//       if (KH == ShapedType::kDynamic || KW == ShapedType::kDynamic)
+//         return op.emitError("kernel_shape missing and cannot infer"), failure();
+//       kernelShape.assign({KH, KW});
+//     }
+
+//     // Constraints
+//     if (dilations.size() != 2 || dilations[0] != 1 || dilations[1] != 1)
+//       return op.emitError("Only dilations=[1,1] supported"), failure();
+//     if (strides.size() != 2)
+//       return op.emitError("strides must have 2 elements"), failure();
+//     if (strides[0] != strides[1])
+//       return op.emitError("Only stride_h == stride_w supported"), failure();
+//     if (pads.size() != 4)
+//       return op.emitError("pads must have 4 elements"), failure();
+//     if (!(pads[0] == pads[1] && pads[0] == pads[2] && pads[0] == pads[3]))
+//       return op.emitError("Only symmetric pads=[p,p,p,p] supported"), failure();
+//     if (kernelShape.size() != 2 || kernelShape[0] != kernelShape[1])
+//       return op.emitError("Only square kernel supported"), failure();
+
+//     int64_t K = kernelShape[0];
+//     int64_t STRIDE = strides[0];
+//     int64_t PADDING = pads[0];
+
+//     auto isStatic = [](int64_t d) { return d != ShapedType::kDynamic; };
+
+//     // Static dims (may be dynamic)
+//     int64_t T_s   = xType.getDimSize(0);
+//     int64_t CHI_s = xType.getDimSize(1);
+//     int64_t HI_s  = xType.getDimSize(2);
+//     int64_t WI_s  = xType.getDimSize(3);
+
+//     int64_t CHO_s  = wType.getDimSize(0);
+//     int64_t WCHI_s = wType.getDimSize(1);
+//     int64_t KH_s   = wType.getDimSize(2);
+//     int64_t KW_s   = wType.getDimSize(3);
+
+//     int64_t yT_s = yType.getDimSize(0);
+//     int64_t yC_s = yType.getDimSize(1);
+//     int64_t HO_s = yType.getDimSize(2);
+//     int64_t WO_s = yType.getDimSize(3);
+
+//     // consistency checks
+//     if (isStatic(WCHI_s) && isStatic(CHI_s) && WCHI_s != CHI_s)
+//       return op.emitError("weight CHI mismatch"), failure();
+//     if (isStatic(KH_s) && KH_s != K)
+//       return op.emitError("weight KH mismatch"), failure();
+//     if (isStatic(KW_s) && KW_s != K)
+//       return op.emitError("weight KW mismatch"), failure();
+//     if (isStatic(yT_s) && isStatic(T_s) && yT_s != T_s)
+//       return op.emitError("Y batch mismatch"), failure();
+//     if (isStatic(yC_s) && isStatic(CHO_s) && yC_s != CHO_s)
+//       return op.emitError("Y channel mismatch"), failure();
+
+//     // tensor -> memref
+//     Type f32Ty = rewriter.getF32Type();
+//     Type i32Ty = rewriter.getI32Type();
+//     Type i64Ty = rewriter.getI64Type();
+
+//     MemRefType xMrTy = MemRefType::get({T_s, CHI_s, HI_s, WI_s}, f32Ty);
+//     MemRefType wMrTy = MemRefType::get({CHO_s, WCHI_s, KH_s, KW_s}, f32Ty);
+
+//     Value xBuf = tensorToMemref(rewriter, loc, X, xMrTy);
+//     Value wBuf = tensorToMemref(rewriter, loc, W, wMrTy);
+
+//     // Helpers
+//     auto cIndex = [&](int64_t v) -> Value {
+//       return rewriter.create<arith::ConstantIndexOp>(loc, v).getResult();
+//     };
+//     auto dim = [&](Value mem, int64_t axis) -> Value {
+//       return rewriter.create<memref::DimOp>(loc, mem, axis).getResult();
+//     };
+//     auto cI32 = [&](int64_t v) -> Value {
+//       return rewriter.create<arith::ConstantIntOp>(loc, v, i32Ty).getResult();
+//     };
+//     auto idxToI32 = [&](Value idx) -> Value {
+//       return rewriter.create<arith::IndexCastOp>(loc, i32Ty, idx).getResult();
+//     };
+//     auto idxToI64 = [&](Value idx) -> Value {
+//       return rewriter.create<arith::IndexCastOp>(loc, i64Ty, idx).getResult();
+//     };
+//     auto cI64 = [&](int64_t v) -> Value {
+//       return rewriter.create<arith::ConstantIntOp>(loc, v, i64Ty).getResult();
+//     };
+
+//     // runtime dims (index)
+//     Value T_v   = isStatic(T_s)   ? cIndex(T_s)   : dim(xBuf, 0);
+//     Value CHI_v = isStatic(CHI_s) ? cIndex(CHI_s) : dim(xBuf, 1);
+//     Value HI_v  = isStatic(HI_s)  ? cIndex(HI_s)  : dim(xBuf, 2);
+//     Value WI_v  = isStatic(WI_s)  ? cIndex(WI_s)  : dim(xBuf, 3);
+//     Value CHO_v = isStatic(CHO_s) ? cIndex(CHO_s) : dim(wBuf, 0);
+
+//     // Static HO/WO if possible (for fully static outLinear length)
+//     std::optional<int64_t> HO_static =
+//         computeOutDimStatic(HI_s, PADDING, K, STRIDE);
+//     std::optional<int64_t> WO_static =
+//         computeOutDimStatic(WI_s, PADDING, K, STRIDE);
+
+//     // HO/WO values (index) used for copy-back loops
+//     Value HO_v = isStatic(HO_s) ? cIndex(HO_s) : [&]() -> Value {
+//       Value twoP = cIndex(2 * PADDING);
+//       Value Kc   = cIndex(K);
+//       Value Str  = cIndex(STRIDE);
+//       Value num = rewriter.create<arith::SubIOp>(
+//           loc,
+//           rewriter.create<arith::AddIOp>(loc, HI_v, twoP), Kc).getResult();
+//       Value div = rewriter.create<arith::DivSIOp>(loc, num, Str).getResult();
+//       return rewriter.create<arith::AddIOp>(loc, div, cIndex(1)).getResult();
+//     }();
+
+//     Value WO_v = isStatic(WO_s) ? cIndex(WO_s) : [&]() -> Value {
+//       Value twoP = cIndex(2 * PADDING);
+//       Value Kc   = cIndex(K);
+//       Value Str  = cIndex(STRIDE);
+//       Value num = rewriter.create<arith::SubIOp>(
+//           loc,
+//           rewriter.create<arith::AddIOp>(loc, WI_v, twoP), Kc).getResult();
+//       Value div = rewriter.create<arith::DivSIOp>(loc, num, Str).getResult();
+//       return rewriter.create<arith::AddIOp>(loc, div, cIndex(1)).getResult();
+//     }();
+
+//     // elems (index)
+//     Value inElemsIdx =
+//         rewriter.create<arith::MulIOp>(
+//             loc,
+//             rewriter.create<arith::MulIOp>(
+//                 loc,
+//                 rewriter.create<arith::MulIOp>(loc, T_v, CHI_v).getResult(),
+//                 HI_v).getResult(),
+//             WI_v).getResult();
+
+//     Value wElemsIdx =
+//         rewriter.create<arith::MulIOp>(
+//             loc,
+//             rewriter.create<arith::MulIOp>(
+//                 loc,
+//                 rewriter.create<arith::MulIOp>(loc, CHO_v, CHI_v).getResult(),
+//                 cIndex(K)).getResult(),
+//             cIndex(K)).getResult();
+
+//     Value outElemsIdx =
+//         rewriter.create<arith::MulIOp>(
+//             loc,
+//             rewriter.create<arith::MulIOp>(
+//                 loc,
+//                 rewriter.create<arith::MulIOp>(loc, T_v, CHO_v).getResult(),
+//                 HO_v).getResult(),
+//             WO_v).getResult();
+
+//     Value inElemsI64  = idxToI64(inElemsIdx);
+//     Value wElemsI64   = idxToI64(wElemsIdx);
+//     Value outElemsI64 = idxToI64(outElemsIdx);
+
+//     // i32 args
+//     Value T_i32   = idxToI32(T_v);
+//     Value CHI_i32 = idxToI32(CHI_v);
+//     Value HI_i32  = idxToI32(HI_v);
+//     Value WI_i32  = idxToI32(WI_v);
+//     Value CHO_i32 = idxToI32(CHO_v);
+
+//     Value K_i32       = cI32(K);
+//     Value STRIDE_i32  = cI32(STRIDE);
+//     Value PADDING_i32 = cI32(PADDING);
+
+//     // Decide wrapper-vs-direct-ptr call.
+//     bool xStatic4 = isStaticShape(xMrTy.getShape());
+//     bool wStatic4 = isStaticShape(wMrTy.getShape());
+//     bool canStaticOut =
+//         xStatic4 && wStatic4 && HO_static.has_value() && WO_static.has_value();
+
+//     Value outLinear;
+//     StringRef calleeName;
+//     SmallVector<Value, 16> callArgs;
+
+//     if (canStaticOut) {
+//       int64_t HO_ss = *HO_static;
+//       int64_t WO_ss = *WO_static;
+//       int64_t outElemsSS = T_s * CHO_s * HO_ss * WO_ss;
+
+//       MemRefType outLinearTy = MemRefType::get({outElemsSS}, f32Ty);
+//       outLinear = rewriter.create<memref::AllocOp>(loc, outLinearTy).getResult();
+
+//       func::FuncOp wrapper = getOrCreateConvWrapperToPtr(
+//           rewriter, module, loc, xMrTy, wMrTy, outLinearTy, outElemsSS);
+
+//       calleeName = wrapper.getName();
+
+//       callArgs = {
+//           T_i32, CHI_i32, HI_i32, WI_i32,
+//           CHO_i32, K_i32, STRIDE_i32, PADDING_i32,
+//           xBuf, inElemsI64,
+//           wBuf, wElemsI64,
+//           outLinear, cI64(outElemsSS)};
+//     } else {
+//       // Dynamic outLinear
+//       MemRefType dyn1f32 = MemRefType::get({ShapedType::kDynamic}, f32Ty);
+//       outLinear =
+//           rewriter.create<memref::AllocOp>(loc, dyn1f32, ValueRange{outElemsIdx})
+//               .getResult();
+
+//       // Direct call default ptr entry.
+//       calleeName = "conv_compute_currents_from_f32_ptr_defaultNP_f32out";
+
+//       auto extractPtrAsIndex = [&](Value mem) -> Value {
+//         return rewriter
+//             .create<memref::ExtractAlignedPointerAsIndexOp>(loc, mem)
+//             .getResult();
+//       };
+
+//       Type f32PtrT = emitc::PointerType::get(f32Ty);
+//       Value xPtr =
+//           rewriter.create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(xBuf))
+//               .getResult();
+//       Value wPtr =
+//           rewriter.create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(wBuf))
+//               .getResult();
+//       Value oPtr = rewriter
+//                        .create<emitc::CastOp>(loc, f32PtrT,
+//                                              extractPtrAsIndex(outLinear))
+//                        .getResult();
+
+//       callArgs = {
+//           T_i32, CHI_i32, HI_i32, WI_i32,
+//           CHO_i32, K_i32, STRIDE_i32, PADDING_i32,
+//           xPtr, inElemsI64,
+//           wPtr, wElemsI64,
+//           oPtr, outElemsI64};
+//     }
+
+//     // Call (wrapper or default ptr entry)
+//     rewriter.create<func::CallOp>(loc, calleeName, TypeRange{i32Ty}, callArgs);
+
+//     // Copy linear -> out4 and return tensor (unchanged)
+//     MemRefType out4Ty = MemRefType::get({T_s, CHO_s, HO_s, WO_s}, f32Ty);
+//     SmallVector<Value, 4> outDynSizes;
+//     if (!isStatic(T_s))   outDynSizes.push_back(T_v);
+//     if (!isStatic(CHO_s)) outDynSizes.push_back(CHO_v);
+//     if (!isStatic(HO_s))  outDynSizes.push_back(HO_v);
+//     if (!isStatic(WO_s))  outDynSizes.push_back(WO_v);
+
+//     Value out4 =
+//         rewriter.create<memref::AllocOp>(loc, out4Ty, outDynSizes).getResult();
+
+//     Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+
+//     // lin = (((t*CHO + c)*HO + h)*WO + w)
+//     buildKrnlLoop(rewriter, loc, c0, T_v, [&](OpBuilder &b, Location l, Value t) {
+//       buildKrnlLoop(b, l, c0, CHO_v, [&](OpBuilder &b, Location l, Value c) {
+//         buildKrnlLoop(b, l, c0, HO_v, [&](OpBuilder &b, Location l, Value h) {
+//           buildKrnlLoop(b, l, c0, WO_v, [&](OpBuilder &b, Location l, Value w) {
+//             Value tCHO = b.create<arith::MulIOp>(l, t, CHO_v).getResult();
+//             Value tCHOc = b.create<arith::AddIOp>(l, tCHO, c).getResult();
+//             Value tCHOcHO = b.create<arith::MulIOp>(l, tCHOc, HO_v).getResult();
+//             Value tCHOcHOh = b.create<arith::AddIOp>(l, tCHOcHO, h).getResult();
+//             Value tCHOcHOhWO =
+//                 b.create<arith::MulIOp>(l, tCHOcHOh, WO_v).getResult();
+//             Value lin = b.create<arith::AddIOp>(l, tCHOcHOhWO, w).getResult();
+
+//             Value v =
+//                 b.create<memref::LoadOp>(l, outLinear, ValueRange{lin});
+//             b.create<memref::StoreOp>(l, v, out4, ValueRange{t, c, h, w});
+//           });
+//         });
+//       });
+//     });
+
+//     Value outTensor = memrefToTensor(rewriter, loc, out4, yType);
+//     rewriter.replaceOp(op, outTensor);
+//     return success();
+//   }
+// };
+
+// ONNXConvOpToKrnlIntrinsicCall — 更新版
+// 变更摘要：
+//   1. 放宽约束：支持非方形 kernel / 非等 stride / 非等 padding（仅要求每轴对称）
+//   2. 提取 KH/KW/STRIDE_H/STRIDE_W/PAD_H/PAD_W，计算 isSquare 标志
+//   3. canStaticOut 只走方形路径（静态 wrapper）；非方形始终走 direct-ptr 路径
+//   4. direct-ptr else 分支内按 isSquare 分发到不同 callee
+ 
+// ── 新增：声明非方形 bridge 函数 ──────────────────────────────────────
+// 放在 declareConvIntrinsicBridge 的同级位置，或追加到其实现中。
+//===----------------------------------------------------------------------===//
+// 3) Pattern: ONNXSConvOp -> func.call intrinsic + linear buffer + copy-back
+//===----------------------------------------------------------------------===//
+
+static void declareNonSquareConvBridge(OpBuilder &rewriter,
+                                       ModuleOp module,
+                                       Location loc) {
+  const StringRef kName =
+      "conv_compute_currents_from_f32_ptr_defaultNP_f32out_nonsquare";
+
+  if (module.lookupSymbol<func::FuncOp>(kName))
+    return;
+
+  MLIRContext *ctx = rewriter.getContext();
+  Type i32Ty = IntegerType::get(ctx, 32);
+  Type i64Ty = IntegerType::get(ctx, 64);
+  Type f32Ty = Float32Type::get(ctx);
+  Type f32PtrTy = emitc::PointerType::get(f32Ty);
+
+  // Function signature:
+  //   i32 func(
+  //     i32 T, i32 CHI, i32 HI, i32 WI,
+  //     i32 CHO,
+  //     i32 KH, i32 KW,
+  //     i32 STRIDE_H, i32 STRIDE_W,
+  //     i32 PAD_H, i32 PAD_W,
+  //     f32* input,  i64 input_elems,
+  //     f32* weight, i64 weight_elems,
+  //     f32* output, i64 output_elems)
+  SmallVector<Type, 17> argTys = {
+      i32Ty, i32Ty, i32Ty, i32Ty, // T, CHI, HI, WI
+      i32Ty,                     // CHO
+      i32Ty, i32Ty,              // KH, KW
+      i32Ty, i32Ty,              // STRIDE_H, STRIDE_W
+      i32Ty, i32Ty,              // PAD_H, PAD_W
+      f32PtrTy, i64Ty,           // input ptr, input elems
+      f32PtrTy, i64Ty,           // weight ptr, weight elems
+      f32PtrTy, i64Ty            // output ptr, output elems
+  };
+
+  FunctionType fnTy = FunctionType::get(ctx, argTys, {i32Ty});
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(module.getBody());
+
+  auto fnOp = rewriter.create<func::FuncOp>(loc, kName, fnTy);
+  fnOp.setPrivate();
+}
+
+struct ONNXSConvOpToKrnlIntrinsicCall final
+    : public OpRewritePattern<ONNXSConvOp> {
   using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(ONNXSConvOp op,
                                 PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    declareConvIntrinsicBridge(rewriter, module, loc);
 
-    // Operands
+    declareConvIntrinsicBridge(rewriter, module, loc);
+    declareNonSquareConvBridge(rewriter, module, loc);
+
     Value X = op.getX();
     Value W = op.getW();
     Value B = op.getB();
 
-    // Types
     auto xType = dyn_cast<RankedTensorType>(X.getType());
     auto wType = dyn_cast<RankedTensorType>(W.getType());
     auto yType = dyn_cast<RankedTensorType>(op.getResult().getType());
+
     if (!xType || !wType || !yType)
       return op.emitError("X/W/Y must be RankedTensorType"), failure();
 
@@ -2819,14 +3198,14 @@ struct ONNXSConvOpToKrnlIntrinsicCall final
         !yType.getElementType().isF32())
       return op.emitError("Only f32 X/W/Y supported"), failure();
 
-    // Bias must be none
     if (B && !isa<NoneType>(B.getType()))
       return op.emitError("Bias is not supported by this lowering"), failure();
 
-    // Attributes (force group=1)
     SmallVector<int64_t, 4> pads, strides, dilations, kernelShape;
+
     if (failed(getI64ArrayAttr(op, "pads", pads)))
       return op.emitError("Missing/invalid pads"), failure();
+
     if (failed(getI64ArrayAttr(op, "strides", strides)))
       return op.emitError("Missing/invalid strides"), failure();
 
@@ -2836,60 +3215,79 @@ struct ONNXSConvOpToKrnlIntrinsicCall final
     if (failed(getI64ArrayAttr(op, "kernel_shape", kernelShape))) {
       int64_t KH = wType.getDimSize(2);
       int64_t KW = wType.getDimSize(3);
+
       if (KH == ShapedType::kDynamic || KW == ShapedType::kDynamic)
         return op.emitError("kernel_shape missing and cannot infer"), failure();
+
       kernelShape.assign({KH, KW});
     }
 
-    // Constraints
     if (dilations.size() != 2 || dilations[0] != 1 || dilations[1] != 1)
       return op.emitError("Only dilations=[1,1] supported"), failure();
+
     if (strides.size() != 2)
       return op.emitError("strides must have 2 elements"), failure();
-    if (strides[0] != strides[1])
-      return op.emitError("Only stride_h == stride_w supported"), failure();
+
     if (pads.size() != 4)
       return op.emitError("pads must have 4 elements"), failure();
-    if (!(pads[0] == pads[1] && pads[0] == pads[2] && pads[0] == pads[3]))
-      return op.emitError("Only symmetric pads=[p,p,p,p] supported"), failure();
-    if (kernelShape.size() != 2 || kernelShape[0] != kernelShape[1])
-      return op.emitError("Only square kernel supported"), failure();
 
-    int64_t K = kernelShape[0];
-    int64_t STRIDE = strides[0];
-    int64_t PADDING = pads[0];
+    if (pads[0] != pads[2])
+      return op.emitError("Asymmetric H padding not supported"), failure();
 
-    auto isStatic = [](int64_t d) { return d != ShapedType::kDynamic; };
+    if (pads[1] != pads[3])
+      return op.emitError("Asymmetric W padding not supported"), failure();
 
-    // Static dims (may be dynamic)
-    int64_t T_s   = xType.getDimSize(0);
+    if (kernelShape.size() != 2)
+      return op.emitError("kernel_shape must have 2 elements"), failure();
+
+    int64_t KH = kernelShape[0];
+    int64_t KW = kernelShape[1];
+    int64_t STRIDE_H = strides[0];
+    int64_t STRIDE_W = strides[1];
+    int64_t PAD_H = pads[0];
+    int64_t PAD_W = pads[1];
+
+    bool isSquare =
+        (KH == KW) && (STRIDE_H == STRIDE_W) && (PAD_H == PAD_W);
+
+    int64_t K = KH;
+    int64_t STRIDE = STRIDE_H;
+    int64_t PADDING = PAD_H;
+
+    auto isStatic = [](int64_t d) {
+      return d != ShapedType::kDynamic;
+    };
+
+    int64_t T_s = xType.getDimSize(0);
     int64_t CHI_s = xType.getDimSize(1);
-    int64_t HI_s  = xType.getDimSize(2);
-    int64_t WI_s  = xType.getDimSize(3);
+    int64_t HI_s = xType.getDimSize(2);
+    int64_t WI_s = xType.getDimSize(3);
 
-    int64_t CHO_s  = wType.getDimSize(0);
+    int64_t CHO_s = wType.getDimSize(0);
     int64_t WCHI_s = wType.getDimSize(1);
-    int64_t KH_s   = wType.getDimSize(2);
-    int64_t KW_s   = wType.getDimSize(3);
+    int64_t KH_s = wType.getDimSize(2);
+    int64_t KW_s = wType.getDimSize(3);
 
     int64_t yT_s = yType.getDimSize(0);
     int64_t yC_s = yType.getDimSize(1);
     int64_t HO_s = yType.getDimSize(2);
     int64_t WO_s = yType.getDimSize(3);
 
-    // consistency checks
     if (isStatic(WCHI_s) && isStatic(CHI_s) && WCHI_s != CHI_s)
       return op.emitError("weight CHI mismatch"), failure();
-    if (isStatic(KH_s) && KH_s != K)
+
+    if (isStatic(KH_s) && KH_s != KH)
       return op.emitError("weight KH mismatch"), failure();
-    if (isStatic(KW_s) && KW_s != K)
+
+    if (isStatic(KW_s) && KW_s != KW)
       return op.emitError("weight KW mismatch"), failure();
+
     if (isStatic(yT_s) && isStatic(T_s) && yT_s != T_s)
       return op.emitError("Y batch mismatch"), failure();
+
     if (isStatic(yC_s) && isStatic(CHO_s) && yC_s != CHO_s)
       return op.emitError("Y channel mismatch"), failure();
 
-    // tensor -> memref
     Type f32Ty = rewriter.getF32Type();
     Type i32Ty = rewriter.getI32Type();
     Type i64Ty = rewriter.getI64Type();
@@ -2900,122 +3298,156 @@ struct ONNXSConvOpToKrnlIntrinsicCall final
     Value xBuf = tensorToMemref(rewriter, loc, X, xMrTy);
     Value wBuf = tensorToMemref(rewriter, loc, W, wMrTy);
 
-    // Helpers
     auto cIndex = [&](int64_t v) -> Value {
       return rewriter.create<arith::ConstantIndexOp>(loc, v).getResult();
     };
+
     auto dim = [&](Value mem, int64_t axis) -> Value {
       return rewriter.create<memref::DimOp>(loc, mem, axis).getResult();
     };
+
     auto cI32 = [&](int64_t v) -> Value {
       return rewriter.create<arith::ConstantIntOp>(loc, v, i32Ty).getResult();
     };
-    auto idxToI32 = [&](Value idx) -> Value {
-      return rewriter.create<arith::IndexCastOp>(loc, i32Ty, idx).getResult();
-    };
-    auto idxToI64 = [&](Value idx) -> Value {
-      return rewriter.create<arith::IndexCastOp>(loc, i64Ty, idx).getResult();
-    };
+
     auto cI64 = [&](int64_t v) -> Value {
       return rewriter.create<arith::ConstantIntOp>(loc, v, i64Ty).getResult();
     };
 
-    // runtime dims (index)
-    Value T_v   = isStatic(T_s)   ? cIndex(T_s)   : dim(xBuf, 0);
+    auto idxToI32 = [&](Value idx) -> Value {
+      return rewriter.create<arith::IndexCastOp>(loc, i32Ty, idx).getResult();
+    };
+
+    auto idxToI64 = [&](Value idx) -> Value {
+      return rewriter.create<arith::IndexCastOp>(loc, i64Ty, idx).getResult();
+    };
+
+    Value T_v = isStatic(T_s) ? cIndex(T_s) : dim(xBuf, 0);
     Value CHI_v = isStatic(CHI_s) ? cIndex(CHI_s) : dim(xBuf, 1);
-    Value HI_v  = isStatic(HI_s)  ? cIndex(HI_s)  : dim(xBuf, 2);
-    Value WI_v  = isStatic(WI_s)  ? cIndex(WI_s)  : dim(xBuf, 3);
+    Value HI_v = isStatic(HI_s) ? cIndex(HI_s) : dim(xBuf, 2);
+    Value WI_v = isStatic(WI_s) ? cIndex(WI_s) : dim(xBuf, 3);
     Value CHO_v = isStatic(CHO_s) ? cIndex(CHO_s) : dim(wBuf, 0);
 
-    // Static HO/WO if possible (for fully static outLinear length)
     std::optional<int64_t> HO_static =
-        computeOutDimStatic(HI_s, PADDING, K, STRIDE);
+        computeOutDimStatic(HI_s, PAD_H, KH, STRIDE_H);
+
     std::optional<int64_t> WO_static =
-        computeOutDimStatic(WI_s, PADDING, K, STRIDE);
+        computeOutDimStatic(WI_s, PAD_W, KW, STRIDE_W);
 
-    // HO/WO values (index) used for copy-back loops
-    Value HO_v = isStatic(HO_s) ? cIndex(HO_s) : [&]() -> Value {
-      Value twoP = cIndex(2 * PADDING);
-      Value Kc   = cIndex(K);
-      Value Str  = cIndex(STRIDE);
-      Value num = rewriter.create<arith::SubIOp>(
-          loc,
-          rewriter.create<arith::AddIOp>(loc, HI_v, twoP), Kc).getResult();
-      Value div = rewriter.create<arith::DivSIOp>(loc, num, Str).getResult();
+    auto computeOutDimValue = [&](Value IN_v, int64_t PAD, int64_t Kdim,
+                                  int64_t STR,
+                                  int64_t resultStaticDim) -> Value {
+      if (isStatic(resultStaticDim))
+        return cIndex(resultStaticDim);
+
+      Value twoP = cIndex(2 * PAD);
+      Value Kc = cIndex(Kdim);
+      Value Str = cIndex(STR);
+
+      Value padded =
+          rewriter.create<arith::AddIOp>(loc, IN_v, twoP).getResult();
+
+      Value num =
+          rewriter.create<arith::SubIOp>(loc, padded, Kc).getResult();
+
+      Value div =
+          rewriter.create<arith::DivSIOp>(loc, num, Str).getResult();
+
       return rewriter.create<arith::AddIOp>(loc, div, cIndex(1)).getResult();
-    }();
+    };
 
-    Value WO_v = isStatic(WO_s) ? cIndex(WO_s) : [&]() -> Value {
-      Value twoP = cIndex(2 * PADDING);
-      Value Kc   = cIndex(K);
-      Value Str  = cIndex(STRIDE);
-      Value num = rewriter.create<arith::SubIOp>(
-          loc,
-          rewriter.create<arith::AddIOp>(loc, WI_v, twoP), Kc).getResult();
-      Value div = rewriter.create<arith::DivSIOp>(loc, num, Str).getResult();
-      return rewriter.create<arith::AddIOp>(loc, div, cIndex(1)).getResult();
-    }();
+    Value HO_v = computeOutDimValue(HI_v, PAD_H, KH, STRIDE_H, HO_s);
+    Value WO_v = computeOutDimValue(WI_v, PAD_W, KW, STRIDE_W, WO_s);
 
-    // elems (index)
     Value inElemsIdx =
-        rewriter.create<arith::MulIOp>(
-            loc,
-            rewriter.create<arith::MulIOp>(
+        rewriter
+            .create<arith::MulIOp>(
                 loc,
-                rewriter.create<arith::MulIOp>(loc, T_v, CHI_v).getResult(),
-                HI_v).getResult(),
-            WI_v).getResult();
+                rewriter
+                    .create<arith::MulIOp>(
+                        loc,
+                        rewriter.create<arith::MulIOp>(loc, T_v, CHI_v)
+                            .getResult(),
+                        HI_v)
+                    .getResult(),
+                WI_v)
+            .getResult();
 
     Value wElemsIdx =
-        rewriter.create<arith::MulIOp>(
-            loc,
-            rewriter.create<arith::MulIOp>(
+        rewriter
+            .create<arith::MulIOp>(
                 loc,
-                rewriter.create<arith::MulIOp>(loc, CHO_v, CHI_v).getResult(),
-                cIndex(K)).getResult(),
-            cIndex(K)).getResult();
+                rewriter
+                    .create<arith::MulIOp>(
+                        loc,
+                        rewriter.create<arith::MulIOp>(loc, CHO_v, CHI_v)
+                            .getResult(),
+                        cIndex(KH))
+                    .getResult(),
+                cIndex(KW))
+            .getResult();
 
     Value outElemsIdx =
-        rewriter.create<arith::MulIOp>(
-            loc,
-            rewriter.create<arith::MulIOp>(
+        rewriter
+            .create<arith::MulIOp>(
                 loc,
-                rewriter.create<arith::MulIOp>(loc, T_v, CHO_v).getResult(),
-                HO_v).getResult(),
-            WO_v).getResult();
+                rewriter
+                    .create<arith::MulIOp>(
+                        loc,
+                        rewriter.create<arith::MulIOp>(loc, T_v, CHO_v)
+                            .getResult(),
+                        HO_v)
+                    .getResult(),
+                WO_v)
+            .getResult();
 
-    Value inElemsI64  = idxToI64(inElemsIdx);
-    Value wElemsI64   = idxToI64(wElemsIdx);
+    Value inElemsI64 = idxToI64(inElemsIdx);
+    Value wElemsI64 = idxToI64(wElemsIdx);
     Value outElemsI64 = idxToI64(outElemsIdx);
 
-    // i32 args
-    Value T_i32   = idxToI32(T_v);
+    Value T_i32 = idxToI32(T_v);
     Value CHI_i32 = idxToI32(CHI_v);
-    Value HI_i32  = idxToI32(HI_v);
-    Value WI_i32  = idxToI32(WI_v);
+    Value HI_i32 = idxToI32(HI_v);
+    Value WI_i32 = idxToI32(WI_v);
     Value CHO_i32 = idxToI32(CHO_v);
 
-    Value K_i32       = cI32(K);
-    Value STRIDE_i32  = cI32(STRIDE);
+    Value K_i32 = cI32(K);
+    Value STRIDE_i32 = cI32(STRIDE);
     Value PADDING_i32 = cI32(PADDING);
 
-    // Decide wrapper-vs-direct-ptr call.
+    Value KH_i32 = cI32(KH);
+    Value KW_i32 = cI32(KW);
+    Value STRIDE_H_i32 = cI32(STRIDE_H);
+    Value STRIDE_W_i32 = cI32(STRIDE_W);
+    Value PAD_H_i32 = cI32(PAD_H);
+    Value PAD_W_i32 = cI32(PAD_W);
+
     bool xStatic4 = isStaticShape(xMrTy.getShape());
     bool wStatic4 = isStaticShape(wMrTy.getShape());
-    bool canStaticOut =
-        xStatic4 && wStatic4 && HO_static.has_value() && WO_static.has_value();
+
+    bool canUseStaticWrapper =
+        isSquare && xStatic4 && wStatic4 && HO_static.has_value() &&
+        WO_static.has_value();
+
+    std::optional<int64_t> outElemsStatic;
+    if (isStatic(T_s) && isStatic(CHO_s) && HO_static.has_value() &&
+        WO_static.has_value()) {
+      outElemsStatic = T_s * CHO_s * (*HO_static) * (*WO_static);
+    }
 
     Value outLinear;
     StringRef calleeName;
-    SmallVector<Value, 16> callArgs;
+    SmallVector<Value, 18> callArgs;
 
-    if (canStaticOut) {
+    if (canUseStaticWrapper) {
       int64_t HO_ss = *HO_static;
       int64_t WO_ss = *WO_static;
       int64_t outElemsSS = T_s * CHO_s * HO_ss * WO_ss;
 
       MemRefType outLinearTy = MemRefType::get({outElemsSS}, f32Ty);
-      outLinear = rewriter.create<memref::AllocOp>(loc, outLinearTy).getResult();
+
+      outLinear =
+          rewriter.create<memref::AllocOp>(loc, outLinearTy).getResult();
 
       func::FuncOp wrapper = getOrCreateConvWrapperToPtr(
           rewriter, module, loc, xMrTy, wMrTy, outLinearTy, outElemsSS);
@@ -3029,14 +3461,19 @@ struct ONNXSConvOpToKrnlIntrinsicCall final
           wBuf, wElemsI64,
           outLinear, cI64(outElemsSS)};
     } else {
-      // Dynamic outLinear
-      MemRefType dyn1f32 = MemRefType::get({ShapedType::kDynamic}, f32Ty);
-      outLinear =
-          rewriter.create<memref::AllocOp>(loc, dyn1f32, ValueRange{outElemsIdx})
-              .getResult();
+      if (outElemsStatic.has_value()) {
+        MemRefType static1f32 = MemRefType::get({*outElemsStatic}, f32Ty);
+        outLinear =
+            rewriter.create<memref::AllocOp>(loc, static1f32).getResult();
+      } else {
+        MemRefType dyn1f32 =
+            MemRefType::get({ShapedType::kDynamic}, f32Ty);
 
-      // Direct call default ptr entry.
-      calleeName = "conv_compute_currents_from_f32_ptr_defaultNP_f32out";
+        outLinear =
+            rewriter
+                .create<memref::AllocOp>(loc, dyn1f32, ValueRange{outElemsIdx})
+                .getResult();
+      }
 
       auto extractPtrAsIndex = [&](Value mem) -> Value {
         return rewriter
@@ -3045,56 +3482,94 @@ struct ONNXSConvOpToKrnlIntrinsicCall final
       };
 
       Type f32PtrT = emitc::PointerType::get(f32Ty);
-      Value xPtr =
-          rewriter.create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(xBuf))
-              .getResult();
-      Value wPtr =
-          rewriter.create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(wBuf))
-              .getResult();
-      Value oPtr = rewriter
-                       .create<emitc::CastOp>(loc, f32PtrT,
-                                             extractPtrAsIndex(outLinear))
-                       .getResult();
 
-      callArgs = {
-          T_i32, CHI_i32, HI_i32, WI_i32,
-          CHO_i32, K_i32, STRIDE_i32, PADDING_i32,
-          xPtr, inElemsI64,
-          wPtr, wElemsI64,
-          oPtr, outElemsI64};
+      Value xPtr =
+          rewriter
+              .create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(xBuf))
+              .getResult();
+
+      Value wPtr =
+          rewriter
+              .create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(wBuf))
+              .getResult();
+
+      Value oPtr =
+          rewriter
+              .create<emitc::CastOp>(loc, f32PtrT, extractPtrAsIndex(outLinear))
+              .getResult();
+
+      Value outElemsArg =
+          outElemsStatic.has_value() ? cI64(*outElemsStatic) : outElemsI64;
+
+      if (isSquare) {
+        calleeName =
+            "conv_compute_currents_from_f32_ptr_defaultNP_f32out";
+
+        callArgs = {
+            T_i32, CHI_i32, HI_i32, WI_i32,
+            CHO_i32, K_i32, STRIDE_i32, PADDING_i32,
+            xPtr, inElemsI64,
+            wPtr, wElemsI64,
+            oPtr, outElemsArg};
+      } else {
+        calleeName =
+            "conv_compute_currents_from_f32_ptr_defaultNP_f32out_nonsquare";
+
+        callArgs = {
+            T_i32, CHI_i32, HI_i32, WI_i32,
+            CHO_i32,
+            KH_i32, KW_i32,
+            STRIDE_H_i32, STRIDE_W_i32,
+            PAD_H_i32, PAD_W_i32,
+            xPtr, inElemsI64,
+            wPtr, wElemsI64,
+            oPtr, outElemsArg};
+      }
     }
 
-    // Call (wrapper or default ptr entry)
     rewriter.create<func::CallOp>(loc, calleeName, TypeRange{i32Ty}, callArgs);
 
-    // Copy linear -> out4 and return tensor (unchanged)
     MemRefType out4Ty = MemRefType::get({T_s, CHO_s, HO_s, WO_s}, f32Ty);
+
     SmallVector<Value, 4> outDynSizes;
-    if (!isStatic(T_s))   outDynSizes.push_back(T_v);
-    if (!isStatic(CHO_s)) outDynSizes.push_back(CHO_v);
-    if (!isStatic(HO_s))  outDynSizes.push_back(HO_v);
-    if (!isStatic(WO_s))  outDynSizes.push_back(WO_v);
+
+    if (!isStatic(T_s))
+      outDynSizes.push_back(T_v);
+
+    if (!isStatic(CHO_s))
+      outDynSizes.push_back(CHO_v);
+
+    if (!isStatic(HO_s))
+      outDynSizes.push_back(HO_v);
+
+    if (!isStatic(WO_s))
+      outDynSizes.push_back(WO_v);
 
     Value out4 =
         rewriter.create<memref::AllocOp>(loc, out4Ty, outDynSizes).getResult();
 
     Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
 
-    // lin = (((t*CHO + c)*HO + h)*WO + w)
-    buildKrnlLoop(rewriter, loc, c0, T_v, [&](OpBuilder &b, Location l, Value t) {
-      buildKrnlLoop(b, l, c0, CHO_v, [&](OpBuilder &b, Location l, Value c) {
-        buildKrnlLoop(b, l, c0, HO_v, [&](OpBuilder &b, Location l, Value h) {
-          buildKrnlLoop(b, l, c0, WO_v, [&](OpBuilder &b, Location l, Value w) {
+    buildKrnlLoop(rewriter, loc, c0, T_v,
+                  [&](OpBuilder &b, Location l, Value t) {
+      buildKrnlLoop(b, l, c0, CHO_v,
+                    [&](OpBuilder &b, Location l, Value c) {
+        buildKrnlLoop(b, l, c0, HO_v,
+                      [&](OpBuilder &b, Location l, Value h) {
+          buildKrnlLoop(b, l, c0, WO_v,
+                        [&](OpBuilder &b, Location l, Value w) {
             Value tCHO = b.create<arith::MulIOp>(l, t, CHO_v).getResult();
             Value tCHOc = b.create<arith::AddIOp>(l, tCHO, c).getResult();
-            Value tCHOcHO = b.create<arith::MulIOp>(l, tCHOc, HO_v).getResult();
-            Value tCHOcHOh = b.create<arith::AddIOp>(l, tCHOcHO, h).getResult();
+            Value tCHOcHO =
+                b.create<arith::MulIOp>(l, tCHOc, HO_v).getResult();
+            Value tCHOcHOh =
+                b.create<arith::AddIOp>(l, tCHOcHO, h).getResult();
             Value tCHOcHOhWO =
                 b.create<arith::MulIOp>(l, tCHOcHOh, WO_v).getResult();
             Value lin = b.create<arith::AddIOp>(l, tCHOcHOhWO, w).getResult();
 
-            Value v =
-                b.create<memref::LoadOp>(l, outLinear, ValueRange{lin});
+            Value v = b.create<memref::LoadOp>(l, outLinear, ValueRange{lin});
+
             b.create<memref::StoreOp>(l, v, out4, ValueRange{t, c, h, w});
           });
         });
@@ -3103,10 +3578,10 @@ struct ONNXSConvOpToKrnlIntrinsicCall final
 
     Value outTensor = memrefToTensor(rewriter, loc, out4, yType);
     rewriter.replaceOp(op, outTensor);
+
     return success();
   }
 };
-
 
 // //===----------------------------------------------------------------------===//
 // // 1) Helpers: declare intrinsic bridge(s)
