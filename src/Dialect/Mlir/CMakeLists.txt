@@ -43,6 +43,7 @@ add_onnx_mlir_library(OMMlirDialects
 
   DEPENDS
   OMKrnlIncGen
+  OMONNXIncGen
   OMSpecializedKernelOpInterface
 
   LINK_LIBS PUBLIC
