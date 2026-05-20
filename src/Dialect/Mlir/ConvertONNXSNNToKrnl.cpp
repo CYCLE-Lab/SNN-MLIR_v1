@@ -953,6 +953,7 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
 
   LogicalResult matchAndRewrite(ONNXLIFOp op,
                                 PatternRewriter &rewriter) const override {
+    LLVM_DEBUG(llvm::dbgs() << DEBUG_TYPE << ": "<< "rewriting ONNX.LIF at " << op.getLoc() << "\n");
     Location loc = op.getLoc();
     auto module  = op->getParentOfType<ModuleOp>();
     declareIntrinsics(rewriter, module, loc);
@@ -967,8 +968,8 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
 
     if (!((xRank == 2 && vcRank == 2) ||
         (xRank == 4 && (vcRank == 2 || vcRank == 4))))
-      return rewriter.notifyMatchFailure(
-        op, "LIF expects x/v_combined rank (2,2), (4,2), or (4,4)");
+      return op.emitError("LIF expects x/v_combined rank (2,2), (4,2), or (4,4)"),
+             failure();
 
     // static shape only (per your statement)
     int64_t B = xType.getDimSize(0);
@@ -978,11 +979,13 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
 
     if (xRank == 2) {
       if (vcType.getDimSize(0) != B)
-        return rewriter.notifyMatchFailure(op, "2D: v_combined dim0 must equal B");
+        return op.emitError("2D: v_combined dim0 must equal B"),
+               failure();
       N = xType.getDimSize(1);
       int64_t N2 = vcType.getDimSize(1);
       if (N2 != 2 * N)
-        return rewriter.notifyMatchFailure(op, "2D: v_combined must be (B, 2N)");
+        return op.emitError("2D: v_combined must be (B, 2N)"),
+               failure();
     } else {
       C = xType.getDimSize(1);
       H = xType.getDimSize(2);
@@ -991,24 +994,38 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
       N = C * H * W;
 
       if (vcType.getDimSize(0) != B)
-        return rewriter.notifyMatchFailure(op, "4D: v_combined dim0 must equal B");
+        return rewriter.notifyMatchFailure(op,
+                                           "4D: v_combined dim0 must equal B"),
+               failure();
 
       if (vcRank == 2) {
         int64_t N2 = vcType.getDimSize(1);
         if (N2 != 2 * N)
-          return rewriter.notifyMatchFailure(op, "4D+2D: v_combined must be (B, 2*C*H*W)");
+          return rewriter.notifyMatchFailure(
+                     op, "4D+2D: v_combined must be (B, 2*C*H*W)"),
+                 failure();
       } else {
         int64_t C2 = vcType.getDimSize(1);
         int64_t H2 = vcType.getDimSize(2);
         int64_t W2 = vcType.getDimSize(3);
 
         if (H2 != H || W2 != W)
-          return rewriter.notifyMatchFailure(op, "4D: v_combined H/W must match x H/W");
-        if (C2 != 2 * C)
-          return rewriter.notifyMatchFailure(op, "4D: v_combined must be (B, 2C, H, W)");
+          return rewriter.notifyMatchFailure(
+                     op, "4D: v_combined H/W must match x H/W"),
+                 failure();
+        if (C2 != 2 * C) {
+          LLVM_DEBUG(llvm::dbgs()
+                     << DEBUG_TYPE << ": "
+                     << "Compute error shape, because v_combined C dimension "
+                        "does not match x C dimension * 2.\n");
+          rewriter.notifyMatchFailure(op,
+                                      "4D: v_combined must be (B, 2C, H, W)");
+          return failure();
+        }
       }
     }
-
+    LLVM_DEBUG(llvm::dbgs() << DEBUG_TYPE << ": " << "Compute shape info of ONNX.LIF.\n");
+    
     // hardware batching
     int64_t numBatches = (N + kHardwareNeuronNum - 1) / kHardwareNeuronNum;
 
@@ -1029,7 +1046,9 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     } else if (spikeResType.getRank() == 4) {
       spikeBuf  = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, C, H, W}, spikeElemTy));
     } else {
-      return rewriter.notifyMatchFailure(op, "spike output rank must be 2 or 4");
+      return rewriter.notifyMatchFailure(op,
+                                         "spike output rank must be 2 or 4"),
+             failure();
     }
 
     if (vcNextResType.getRank() == 2) {
@@ -1037,7 +1056,9 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
     } else if (vcNextResType.getRank() == 4) {
       vcNextBuf = rewriter.create<memref::AllocOp>(loc, MemRefType::get({B, 2 * C, H, W}, vcNextElemTy));
     } else {
-      return rewriter.notifyMatchFailure(op, "v_combined_next output rank must be 2 or 4");
+      return rewriter.notifyMatchFailure(
+                 op, "v_combined_next output rank must be 2 or 4"),
+             failure();
     }
 
     // ---------------------------
@@ -1132,6 +1153,9 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
       Value c2_idx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), c2_i64);
       b.create<memref::StoreOp>(loc, i_val, vcNextBuf, ValueRange{ib, c2_idx, idx.hIdx, idx.wIdx});
     };
+
+    LLVM_DEBUG(llvm::dbgs()
+               << DEBUG_TYPE << ": " << "Compute memory info of ONNX.LIF.\n");
 
     // ---------------------------
     // outer loop over batch B
@@ -1314,12 +1338,18 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
         } // end neuron batchIdx
       });
 
+    LLVM_DEBUG(llvm::dbgs()
+               << DEBUG_TYPE << ": " << "Build Kernel loop of ONNX.LIF.\n");
+
     // ---------------------------
     // finalize: memref -> tensor (rank must match)
     // ---------------------------
     Value spikeOut  = memrefToTensor(rewriter, loc, spikeBuf,  spikeResType);
     Value vcNextOut = memrefToTensor(rewriter, loc, vcNextBuf, vcNextResType);
     rewriter.replaceOp(op, ValueRange{spikeOut, vcNextOut});
+
+    LLVM_DEBUG(llvm::dbgs()
+               << DEBUG_TYPE << ": " << "Replace ONNX.LIF by Krnl ops.\n");
     return success();
   }
 };
@@ -2790,9 +2820,6 @@ static LogicalResult getI64ArrayAttr(ONNXSConvOp op, StringRef name,
 // 3) Pattern: ONNXSConvOp -> func.call intrinsic + linear buffer + copy-back
 //===----------------------------------------------------------------------===//
 
-struct ONNXSConvOpToKrnlIntrinsicCall final
-    : public OpRewritePattern<ONNXSConvOp> {
-
 // struct ONNXConvOpToKrnlIntrinsicCall final
 //     : public OpRewritePattern<ONNXConvOp> {
 //   using OpRewritePattern::OpRewritePattern;
@@ -4031,6 +4058,9 @@ public:
     func::FuncOp funcOp = getOperation();
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
+
+    LLVM_DEBUG(llvm::dbgs() << DEBUG_TYPE << ": Start Converting ONNX SNN ops in function: " << funcOp.getName() << " ...\n");
+
     // 同时注册单步和多步 Pattern
     patterns.add<ONNXLIFOpToKrnlConversion>(ctx);
     patterns.add<ONNXMultiStepLIFToKrnlConversion>(ctx);
@@ -4039,6 +4069,9 @@ public:
     patterns.add<ONNXSConvOpToKrnlIntrinsicCall>(ctx);
     if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
+    LLVM_DEBUG(llvm::dbgs()
+               << DEBUG_TYPE << ": Converting ONNX SNN ops in function: "
+               << funcOp.getName() << " Over! \n");
   }
 };
 
