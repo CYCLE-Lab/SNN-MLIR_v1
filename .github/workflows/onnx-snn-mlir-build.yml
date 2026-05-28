@@ -175,7 +175,7 @@ jobs:
       - name: Build onnx-snn-mlir
         run: |
           set -euxo pipefail
-          cmake --build "${BUILD_DIR}"
+          cmake --build "${BUILD_DIR}" --target onnx-mlir --parallel "$(nproc)"
 
       - name: Run lit tests
         id: lit_tests
