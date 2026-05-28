@@ -81,6 +81,12 @@ jobs:
           ./configure --prefix="${PROTOBUF_INSTALL_DIR}" --libdir="${PROTOBUF_INSTALL_DIR}/lib" --enable-static=no
           make -j"$(nproc)" install
 
+      - name: Clone LLVM/MLIR source
+        run: |
+          set -euxo pipefail
+          rm -rf llvm-project
+          bash utils/clone-mlir.sh
+
       - name: Cache LLVM build
         id: cache-llvm
         uses: actions/cache@v4
@@ -88,13 +94,14 @@ jobs:
           path: ${{ env.LLVM_BUILD_DIR }}
           key: ${{ runner.os }}-llvm-${{ hashFiles('utils/clone-mlir.sh', 'utils/build-mlir.sh') }}
 
-      - name: Clone and build LLVM/MLIR
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: Build LLVM/MLIR
         run: |
           set -euxo pipefail
-          rm -rf llvm-project
-          bash utils/clone-mlir.sh
-          bash utils/build-mlir.sh
+          if [[ ! -f "${MLIR_DIR}/MLIRConfig.cmake" ]]; then
+            bash utils/build-mlir.sh
+          else
+            echo "Reusing cached LLVM/MLIR build: ${MLIR_DIR}/MLIRConfig.cmake"
+          fi
 
       - name: Configure and build onnx-snn-mlir
         run: |
@@ -123,15 +130,10 @@ jobs:
             -DONNX_MLIR_ENABLE_WERROR="${ONNX_MLIR_ENABLE_WERROR}" \
             "${cmake_python_args[@]}"
 
-      - name: Pre-generate ONNX tablegen headers
-        run: |
-          set -euxo pipefail
-          cmake --build "${BUILD_DIR}" --target OMONNXIncGen
-
       - name: Build onnx-snn-mlir
         run: |
           set -euxo pipefail
-          cmake --build "${BUILD_DIR}"
+          cmake --build "${BUILD_DIR}" --target onnx-mlir --parallel "$(nproc)"
 
       - name: Run lit tests
         id: lit_tests

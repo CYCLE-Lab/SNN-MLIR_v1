@@ -44,6 +44,9 @@ add_onnx_mlir_library(OMMlirDialects
   DEPENDS
   OMKrnlIncGen
   OMONNXIncGen
+  OMHasOnnxSubgraphOpInterfaceIncGen
+  OMResultTypeInferenceOpInterfaceIncGen
+  OMShapeInferenceOpInterfaceIncGen
   OMSpecializedKernelOpInterface
 
   LINK_LIBS PUBLIC
