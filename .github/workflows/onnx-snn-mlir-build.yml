@@ -152,7 +152,25 @@ jobs:
             src/Dialect/ONNX/ONNXOps.hpp.inc \
             src/Dialect/ONNX/ONNXTypes.cpp.inc \
             src/Dialect/ONNX/ONNXTypes.hpp.inc \
+            src/Interface/HasOnnxSubgraphOpInterface.cpp.inc \
+            src/Interface/HasOnnxSubgraphOpInterface.hpp.inc \
+            src/Interface/ResultTypeInferenceOpInterface.cpp.inc \
+            src/Interface/ResultTypeInferenceOpInterface.hpp.inc \
+            src/Interface/ShapeInferenceOpInterface.cpp.inc \
+            src/Interface/ShapeInferenceOpInterface.hpp.inc \
+            src/Interface/ShapeHelperOpInterface.cpp.inc \
+            src/Interface/ShapeHelperOpInterface.hpp.inc \
+            src/Interface/SpecializedKernelOpInterface.cpp.inc \
+            src/Interface/SpecializedKernelOpInterface.hpp.inc \
             --parallel "$(nproc)"
+
+          echo "=== Debug: verify critical generated .inc files ==="
+          test -f "${BUILD_DIR}/src/Dialect/ONNX/ONNXAttributes.hpp.inc"
+          test -f "${BUILD_DIR}/src/Dialect/ONNX/ONNXOps.hpp.inc"
+          test -f "${BUILD_DIR}/src/Interface/HasOnnxSubgraphOpInterface.hpp.inc"
+          test -f "${BUILD_DIR}/src/Interface/ResultTypeInferenceOpInterface.hpp.inc"
+          test -f "${BUILD_DIR}/src/Interface/ShapeInferenceOpInterface.hpp.inc"
+          test -f "${BUILD_DIR}/src/Interface/ShapeHelperOpInterface.hpp.inc"
 
       - name: Build onnx-snn-mlir
         run: |
