@@ -88,12 +88,16 @@ jobs:
           path: ${{ env.LLVM_BUILD_DIR }}
           key: ${{ runner.os }}-llvm-${{ hashFiles('utils/clone-mlir.sh', 'utils/build-mlir.sh') }}
 
-      - name: Clone and build LLVM/MLIR
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: Clone LLVM/MLIR source
         run: |
           set -euxo pipefail
           rm -rf llvm-project
           bash utils/clone-mlir.sh
+
+      - name: Build LLVM/MLIR
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
           bash utils/build-mlir.sh
 
       - name: Configure and build onnx-snn-mlir
@@ -122,55 +126,6 @@ jobs:
             -DONNX_MLIR_ENABLE_STABLEHLO="${ONNX_MLIR_ENABLE_STABLEHLO}" \
             -DONNX_MLIR_ENABLE_WERROR="${ONNX_MLIR_ENABLE_WERROR}" \
             "${cmake_python_args[@]}"
-
-      - name: Pre-generate ONNX tablegen headers
-        run: |
-          set -euxo pipefail
-          echo "=== Debug: mlir-tblgen info ==="
-          echo "LLVM_BUILD_DIR=${LLVM_BUILD_DIR}"
-          ls -la "${LLVM_BUILD_DIR}/bin" || true
-          if [ -x "${LLVM_BUILD_DIR}/bin/mlir-tblgen" ]; then
-            "${LLVM_BUILD_DIR}/bin/mlir-tblgen" --help | sed -n '1,120p' || true
-          else
-            echo "mlir-tblgen not found at ${LLVM_BUILD_DIR}/bin/mlir-tblgen"
-          fi
-          echo "=== Debug: build.ninja ONNX rules ==="
-          if [ -f "${BUILD_DIR}/build.ninja" ]; then
-            grep -n "ONNXAttributes" "${BUILD_DIR}/build.ninja" || true
-          else
-            echo "${BUILD_DIR}/build.ninja not found"
-          fi
-          echo "=== Debug: pre-existing generated files in build dir ==="
-          ls -la "${BUILD_DIR}/src/Dialect/ONNX" || true
-
-          cmake --build "${BUILD_DIR}" --target \
-            src/Dialect/ONNX/ONNXAttributes.cpp.inc \
-            src/Dialect/ONNX/ONNXAttributes.hpp.inc \
-            src/Dialect/ONNX/ONNXDialect.cpp.inc \
-            src/Dialect/ONNX/ONNXDialect.hpp.inc \
-            src/Dialect/ONNX/ONNXOps.cpp.inc \
-            src/Dialect/ONNX/ONNXOps.hpp.inc \
-            src/Dialect/ONNX/ONNXTypes.cpp.inc \
-            src/Dialect/ONNX/ONNXTypes.hpp.inc \
-            src/Interface/HasOnnxSubgraphOpInterface.cpp.inc \
-            src/Interface/HasOnnxSubgraphOpInterface.hpp.inc \
-            src/Interface/ResultTypeInferenceOpInterface.cpp.inc \
-            src/Interface/ResultTypeInferenceOpInterface.hpp.inc \
-            src/Interface/ShapeInferenceOpInterface.cpp.inc \
-            src/Interface/ShapeInferenceOpInterface.hpp.inc \
-            src/Interface/ShapeHelperOpInterface.cpp.inc \
-            src/Interface/ShapeHelperOpInterface.hpp.inc \
-            src/Interface/SpecializedKernelOpInterface.cpp.inc \
-            src/Interface/SpecializedKernelOpInterface.hpp.inc \
-            --parallel "$(nproc)"
-
-          echo "=== Debug: verify critical generated .inc files ==="
-          test -f "${BUILD_DIR}/src/Dialect/ONNX/ONNXAttributes.hpp.inc"
-          test -f "${BUILD_DIR}/src/Dialect/ONNX/ONNXOps.hpp.inc"
-          test -f "${BUILD_DIR}/src/Interface/HasOnnxSubgraphOpInterface.hpp.inc"
-          test -f "${BUILD_DIR}/src/Interface/ResultTypeInferenceOpInterface.hpp.inc"
-          test -f "${BUILD_DIR}/src/Interface/ShapeInferenceOpInterface.hpp.inc"
-          test -f "${BUILD_DIR}/src/Interface/ShapeHelperOpInterface.hpp.inc"
 
       - name: Build onnx-snn-mlir
         run: |
