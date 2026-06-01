@@ -1173,9 +1173,6 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
           int64_t neuronEnd   = std::min(neuronStart + kHardwareNeuronNum, N);
           int64_t calN        = neuronEnd - neuronStart;
 
-          // Ensure even for group2 reads (same as your original assumption)
-          assert(calN % 2 == 0 && "calN must be even for NCR group2 reads");
-
           b0.create<func::CallOp>(loc, "rvne_clear_neuron_data_1024", TypeRange{}, ValueRange{});
 
           // ---- write V -> NCR[0..calN-1]
@@ -1259,81 +1256,60 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
                 });
             });
 
-          // ---- read back V_next from NCR[0..calN-1]
-          int64_t vNCRGroups = calN / 2;
-          buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, vNCRGroups),
+          // ---- read back V_next / I_next from NCR
+          // Support odd calN: each ncr_group2 read returns 2 lanes; guard the last lane.
+          int64_t ncrGroups = (calN + 1) / 2;
+
+          buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, ncrGroups),
             [&](OpBuilder &b, Location loc, Value ig) {
+              Value ig_i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), ig);
               Value ig_i32 = b.create<arith::IndexCastOp>(loc, b.getI32Type(), ig);
-              Value ig_i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), ig);
 
-              auto rb = b.create<func::CallOp>(loc, "rvne_read_ncr_group2",
-                                               TypeRange{b.getI64Type()}, ValueRange{ig_i32});
-              Value pair64 = rb.getResult(0);
+              auto rb_V = b.create<func::CallOp>(loc, "rvne_read_ncr_group2",
+                                                 TypeRange{b.getI64Type()}, ValueRange{ig_i32});
+              Value pair_V = rb_V.getResult(0);
+
+              Value off_I_i64 = b.create<arith::AddIOp>(loc, ig_i64, mkI64(b, ncrGroups));
+              Value off_I_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), off_I_i64);
+
+              auto rb_I = b.create<func::CallOp>(loc, "rvne_read_ncr_group2",
+                                                 TypeRange{b.getI64Type()}, ValueRange{off_I_i32});
+              Value pair_I = rb_I.getResult(0);
 
               Value cstMask = mkI64(b, 0xFFFFFFFFLL);
-              Value lo64 = b.create<arith::AndIOp>(loc, pair64, cstMask);
-              Value lo_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), lo64);
-
-              Value cst32 = mkI64(b, 32);
-              Value hi64 = b.create<arith::ShRUIOp>(loc, pair64, cst32);
-              Value hi_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), hi64);
-
-              Value cst2 = mkI64(b, 2);
-              Value local_lo = b.create<arith::MulIOp>(loc, ig_i64, cst2);
-              Value cst1 = mkI64(b, 1);
-              Value local_hi = b.create<arith::AddIOp>(loc, local_lo, cst1);
-
               Value cstStart = mkI64(b, neuronStart);
-              Value global_lo = b.create<arith::AddIOp>(loc, local_lo, cstStart);
-              Value global_hi = b.create<arith::AddIOp>(loc, local_hi, cstStart);
+              Value cstCalN = mkI64(b, calN);
 
-              Value v_lo = castI32FromNCRToElemTy(b, loc, lo_i32, vcNextElemTy);
-              Value v_hi = castI32FromNCRToElemTy(b, loc, hi_i32, vcNextElemTy);
+              for (int lane = 0; lane < 2; ++lane) {
+                Value bitOff = (lane == 0) ? mkI64(b, 0) : mkI64(b, 32);
 
-              storeVCNext_V_ByFlatN(b, ib, global_lo, v_lo);
-              storeVCNext_V_ByFlatN(b, ib, global_hi, v_hi);
-            });
+                Value l_idx_i64 = b.create<arith::AddIOp>(
+                    loc, b.create<arith::MulIOp>(loc, ig_i64, mkI64(b, 2)), mkI64(b, lane));
 
-          // ---- read back I_next from NCR[calN..2*calN-1]
-          // group2 index offset = calN/2
-          int64_t iNCRStart  = calN / 2;
-          int64_t iNCRGroups = calN / 2;
+                Value inBounds = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::ult, l_idx_i64, cstCalN);
 
-          buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, iNCRGroups),
-            [&](OpBuilder &b, Location loc, Value ig) {
-              Value ig_i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), ig);
+                Value val_V_i32 = b.create<arith::TruncIOp>(
+                    loc, b.getI32Type(),
+                    b.create<arith::AndIOp>(
+                        loc, b.create<arith::ShRUIOp>(loc, pair_V, bitOff), cstMask));
 
-              // ncr_group = iNCRStart + ig
-              Value cstStartGrp = mkI64(b, iNCRStart);
-              Value grp_i64 = b.create<arith::AddIOp>(loc, ig_i64, cstStartGrp);
-              Value grp_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), grp_i64);
+                Value val_I_i32 = b.create<arith::TruncIOp>(
+                    loc, b.getI32Type(),
+                    b.create<arith::AndIOp>(
+                        loc, b.create<arith::ShRUIOp>(loc, pair_I, bitOff), cstMask));
 
-              auto rb = b.create<func::CallOp>(loc, "rvne_read_ncr_group2",
-                                               TypeRange{b.getI64Type()}, ValueRange{grp_i32});
-              Value pair64 = rb.getResult(0);
+                Value global_n = b.create<arith::AddIOp>(loc, l_idx_i64, cstStart);
+                Value v_val = castI32FromNCRToElemTy(b, loc, val_V_i32, vcNextElemTy);
+                Value i_val = castI32FromNCRToElemTy(b, loc, val_I_i32, vcNextElemTy);
 
-              Value cstMask = mkI64(b, 0xFFFFFFFFLL);
-              Value lo64 = b.create<arith::AndIOp>(loc, pair64, cstMask);
-              Value lo_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), lo64);
-
-              Value cst32 = mkI64(b, 32);
-              Value hi64 = b.create<arith::ShRUIOp>(loc, pair64, cst32);
-              Value hi_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), hi64);
-
-              Value cst2 = mkI64(b, 2);
-              Value local_lo = b.create<arith::MulIOp>(loc, ig_i64, cst2);
-              Value cst1 = mkI64(b, 1);
-              Value local_hi = b.create<arith::AddIOp>(loc, local_lo, cst1);
-
-              Value cstNeuronStart = mkI64(b, neuronStart);
-              Value global_lo = b.create<arith::AddIOp>(loc, local_lo, cstNeuronStart);
-              Value global_hi = b.create<arith::AddIOp>(loc, local_hi, cstNeuronStart);
-
-              Value i_lo = castI32FromNCRToElemTy(b, loc, lo_i32, vcNextElemTy);
-              Value i_hi = castI32FromNCRToElemTy(b, loc, hi_i32, vcNextElemTy);
-
-              storeVCNext_I_ByFlatN(b, ib, global_lo, i_lo);
-              storeVCNext_I_ByFlatN(b, ib, global_hi, i_hi);
+                b.create<scf::IfOp>(loc, inBounds,
+                  [&](OpBuilder &b2, Location loc) {
+                    storeVCNext_V_ByFlatN(b2, ib, global_n, v_val);
+                    storeVCNext_I_ByFlatN(b2, ib, global_n, i_val);
+                    b2.create<scf::YieldOp>(loc);
+                  });
+              }
             });
         } // end neuron batchIdx
       });
