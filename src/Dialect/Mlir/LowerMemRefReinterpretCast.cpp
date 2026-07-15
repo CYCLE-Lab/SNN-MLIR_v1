@@ -47,9 +47,43 @@ public:
         return;
       }
     }
+
+    // EmitC represents MLIR index values as size_t.  Keep signed extrema in
+    // i64 until after maxsi/minsi has selected a non-negative loop bound;
+    // otherwise expressions such as max(0, 1 - 2 * output) are compared as
+    // unsigned values and padded convolutions silently skip most iterations.
+    normalizeSignedIndexExtrema(moduleOp);
   }
 
 private:
+  void normalizeSignedIndexExtrema(ModuleOp moduleOp) {
+    SmallVector<Operation *> extrema;
+    moduleOp.walk([&](Operation *op) {
+      if ((isa<arith::MaxSIOp>(op) || isa<arith::MinSIOp>(op)) &&
+          op->getResult(0).getType().isIndex())
+        extrema.push_back(op);
+    });
+
+    for (Operation *op : extrema) {
+      OpBuilder builder(op);
+      Location loc = op->getLoc();
+      Type i64Type = builder.getI64Type();
+      Value lhs = builder.create<arith::IndexCastOp>(
+          loc, i64Type, op->getOperand(0));
+      Value rhs = builder.create<arith::IndexCastOp>(
+          loc, i64Type, op->getOperand(1));
+      Value selected;
+      if (isa<arith::MaxSIOp>(op))
+        selected = builder.create<arith::MaxSIOp>(loc, lhs, rhs);
+      else
+        selected = builder.create<arith::MinSIOp>(loc, lhs, rhs);
+      Value indexResult = builder.create<arith::IndexCastOp>(
+          loc, builder.getIndexType(), selected);
+      op->getResult(0).replaceAllUsesWith(indexResult);
+      op->erase();
+    }
+  }
+
   static bool hasStaticShape(MemRefType type) {
     if (!type.hasStaticShape())
       return false;
@@ -206,7 +240,7 @@ private:
     for (unsigned i = 0; i < sourceRank; ++i) {
       AffineExpr idxExpr = linearExpr.floorDiv(sourceStrides[i]);
 
-      // 对非最高维做取模，得到该维度的真实 index。
+      // 每个维度都要对该维大小取模，得到真实 index。
       //
       // 例如 source memref<4x40x98xf32>：
       //   source strides = [3920, 98, 1]
@@ -214,13 +248,15 @@ private:
       // linear = i0 * 3920 + i1 * 3920 + i2 * 98 + i3
       //
       // source index:
-      //   d0 = linear floordiv 3920
+      //   d0 = (linear floordiv 3920) mod 4
       //   d1 = (linear floordiv 98) mod 40
       //   d2 = linear mod 98
-      if (i + 1 < sourceRank) {
-        int64_t dimSize = sourceType.getDimSize(i);
-        idxExpr = idxExpr % dimSize;
-      }
+      //
+      // 旧实现漏掉了最后一维的取模。例如把 memref<1x1x6x6>
+      // reshape 为 memref<1x36> 时，最后一维会错误地产生 linear，
+      // 而不是 linear mod 6，导致错误读取乃至越界。
+      int64_t dimSize = sourceType.getDimSize(i);
+      idxExpr = idxExpr % dimSize;
 
       auto map = AffineMap::get(
           /*dimCount=*/targetRank,

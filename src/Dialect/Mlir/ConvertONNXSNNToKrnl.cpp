@@ -468,6 +468,8 @@
 #include "src/Dialect/ONNX/ONNXOps.hpp"
 #include "src/Dialect/Krnl/KrnlOps.hpp"
 
+#include <cmath>
+
 using namespace mlir;
 
 #define DEBUG_TYPE "convert-onnx-lif-to-krnl"
@@ -498,9 +500,19 @@ static void declareIntrinsics(OpBuilder &builder, ModuleOp module, Location loc)
   auto *ctx = builder.getContext();
   getOrInsertFunc(builder, module, loc, "rvne_clear_neuron_data_1024", FunctionType::get(ctx, {}, {}));
   getOrInsertFunc(builder, module, loc, "rvne_write_ncr", FunctionType::get(ctx, {i32T, i32T}, {}));
+  getOrInsertFunc(builder, module, loc, "rvne_write_nvr", FunctionType::get(ctx, {i32T, i32T}, {}));
   getOrInsertFunc(builder, module, loc, "rvne_leakage_integral_fire_1024", FunctionType::get(ctx, {}, {}));
   getOrInsertFunc(builder, module, loc, "rvne_read_sor_group2", FunctionType::get(ctx, {i32T}, {i64T}));
   getOrInsertFunc(builder, module, loc, "rvne_read_ncr_group2", FunctionType::get(ctx, {i32T}, {i64T}));
+  getOrInsertFunc(builder, module, loc, "rvne_read_nvr_group2", FunctionType::get(ctx, {i32T}, {i64T}));
+  getOrInsertFunc(builder, module, loc, "rvne_set_voltage_threshold", FunctionType::get(ctx, {i32T, i32T}, {}));
+  getOrInsertFunc(builder, module, loc, "rvne_set_refractory_period", FunctionType::get(ctx, {i32T, i32T}, {}));
+  getOrInsertFunc(builder, module, loc, "rvne_set_reset_voltage", FunctionType::get(ctx, {i32T, i32T}, {}));
+  getOrInsertFunc(builder, module, loc, "rvne_set_reset_current", FunctionType::get(ctx, {i32T, i32T}, {}));
+  getOrInsertFunc(builder, module, loc, "rvne_set_leakage_index",
+                  FunctionType::get(ctx,
+                      {i32T, i32T, i32T, i32T, i32T, i32T,
+                       i32T, i32T, i32T, i32T, i32T, i32T}, {}));
 }
 
 static void declareSNNFCIntrinsics(OpBuilder &builder, ModuleOp module, Location loc) {
@@ -565,7 +577,7 @@ static Value memrefToTensor(OpBuilder &b, Location loc, Value memref, RankedTens
 
 static Value castElemToI32ForNCR(OpBuilder &b, Location loc, Value elem, Type elemTy) {
   if (elemTy == b.getI32Type()) return elem;
-  if (elemTy.isF32()) return b.create<arith::BitcastOp>(loc, b.getI32Type(), elem);
+  if (elemTy.isF32()) return b.create<arith::FPToSIOp>(loc, b.getI32Type(), elem);
   if (elemTy.isIndex()) {
       Value i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), elem);
       return b.create<arith::TruncIOp>(loc, b.getI32Type(), i64);
@@ -575,7 +587,7 @@ static Value castElemToI32ForNCR(OpBuilder &b, Location loc, Value elem, Type el
 
 static Value castI32FromNCRToElemTy(OpBuilder &b, Location loc, Value val_i32, Type dstTy) {
   if (dstTy == b.getI32Type()) return val_i32;
-  if (dstTy.isF32()) return b.create<arith::BitcastOp>(loc, b.getF32Type(), val_i32);
+  if (dstTy.isF32()) return b.create<arith::SIToFPOp>(loc, b.getF32Type(), val_i32);
   return b.create<arith::ExtSIOp>(loc, dstTy, val_i32);
 }
 
@@ -583,6 +595,75 @@ static Value castSpikeToElemTy(OpBuilder &b, Location loc, Value spike_i32, Type
   if (dstTy == b.getI32Type()) return spike_i32;
   if (dstTy.isF32()) return b.create<arith::SIToFPOp>(loc, b.getF32Type(), spike_i32);
   return b.create<arith::ExtSIOp>(loc, dstTy, spike_i32);
+}
+
+static int32_t getPowerOfTwoShift(double divisor) {
+  if (!(divisor > 0.0))
+    return 0;
+  return static_cast<int32_t>(std::llround(std::log2(divisor)));
+}
+
+static void configureLIFHardware(OpBuilder &builder, Location loc,
+                                 double rawThreshold,
+                                 double rawResetVoltage,
+                                 double tauV, double tauI, double tauVI) {
+  auto i32Constant = [&](int32_t value) -> Value {
+    return builder.create<arith::ConstantIntOp>(loc, value, 32);
+  };
+
+  int32_t threshold = static_cast<int32_t>(
+      std::llround(rawThreshold));
+  int32_t resetVoltage = static_cast<int32_t>(
+      std::llround(rawResetVoltage));
+  int32_t voltageShift = getPowerOfTwoShift(tauV);
+  int32_t currentShift = getPowerOfTwoShift(tauI);
+  int32_t currentToVoltageShift = getPowerOfTwoShift(tauVI);
+
+  Value thresholdValue = i32Constant(threshold);
+  Value zero = i32Constant(0);
+  Value resetVoltageValue = i32Constant(resetVoltage);
+  builder.create<func::CallOp>(loc, "rvne_set_voltage_threshold", TypeRange{},
+                               ValueRange{thresholdValue, thresholdValue});
+  builder.create<func::CallOp>(loc, "rvne_set_refractory_period", TypeRange{},
+                               ValueRange{zero, zero});
+  builder.create<func::CallOp>(loc, "rvne_set_reset_voltage", TypeRange{},
+                               ValueRange{resetVoltageValue, resetVoltageValue});
+  builder.create<func::CallOp>(loc, "rvne_set_reset_current", TypeRange{},
+                               ValueRange{zero, zero});
+
+  Value voltageShiftValue = i32Constant(voltageShift);
+  Value currentShiftValue = i32Constant(currentShift);
+  Value currentToVoltageShiftValue = i32Constant(currentToVoltageShift);
+  builder.create<func::CallOp>(loc, "rvne_set_leakage_index", TypeRange{},
+      ValueRange{zero, zero, zero, voltageShiftValue, currentShiftValue,
+                 currentToVoltageShiftValue,
+                 zero, zero, zero, voltageShiftValue, currentShiftValue,
+                 currentToVoltageShiftValue});
+}
+
+static void configureLIFHardware(OpBuilder &builder, Location loc,
+                                 ONNXLIFOp op) {
+  configureLIFHardware(builder, loc,
+      op.getVTh().convertToDouble(), op.getVReset().convertToDouble(),
+      op.getTauV().convertToDouble(), op.getTauI().convertToDouble(),
+      op.getTauVi().convertToDouble());
+}
+
+static double getCustomFloatAttr(Operation *op, StringRef name,
+                                 double defaultValue) {
+  if (auto attr = op->getAttrOfType<FloatAttr>(name))
+    return attr.getValueAsDouble();
+  return defaultValue;
+}
+
+static void configureMultiStepLIFHardware(OpBuilder &builder, Location loc,
+                                          ONNXCustomOp op) {
+  configureLIFHardware(builder, loc,
+      getCustomFloatAttr(op, "v_th", 1.0),
+      getCustomFloatAttr(op, "v_reset", 0.0),
+      getCustomFloatAttr(op, "tau_v", 1024.0),
+      getCustomFloatAttr(op, "tau_i", 16.0),
+      getCustomFloatAttr(op, "tau_vi", 8.0));
 }
 
 static void buildKrnlLoop(OpBuilder &builder, Location loc, Value lb, Value ub,
@@ -1174,8 +1255,9 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
           int64_t calN        = neuronEnd - neuronStart;
 
           b0.create<func::CallOp>(loc, "rvne_clear_neuron_data_1024", TypeRange{}, ValueRange{});
+          configureLIFHardware(b0, loc, op);
 
-          // ---- write V -> NCR[0..calN-1]
+          // ---- write V -> NVR[0..calN-1]
           buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, calN),
             [&](OpBuilder &b, Location loc, Value local_n) {
               Value local_i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), local_n);
@@ -1185,11 +1267,11 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
               Value v_elem = loadVC_V_ByFlatN(b, ib, global_i64);
               Value v_i32  = castElemToI32ForNCR(b, loc, v_elem, vcElemTy);
 
-              Value ncr_off = b.create<arith::IndexCastOp>(loc, b.getI32Type(), local_n);
-              b.create<func::CallOp>(loc, "rvne_write_ncr", TypeRange{}, ValueRange{v_i32, ncr_off});
+              Value nvr_off = b.create<arith::IndexCastOp>(loc, b.getI32Type(), local_n);
+              b.create<func::CallOp>(loc, "rvne_write_nvr", TypeRange{}, ValueRange{v_i32, nvr_off});
             });
 
-          // ---- write I_old + x -> NCR[calN..2*calN-1]
+          // ---- write I_old + x -> NCR[0..calN-1]
           buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, calN),
             [&](OpBuilder &b, Location loc, Value local_n) {
               Value local_i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), local_n);
@@ -1205,9 +1287,7 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
 
               Value val_i32 = castElemToI32ForNCR(b, loc, i_plus_x, vcElemTy);
 
-              Value cstCalN = mkI64(b, calN);
-              Value ncr_off_i64 = b.create<arith::AddIOp>(loc, local_i64, cstCalN);
-              Value ncr_off_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), ncr_off_i64);
+              Value ncr_off_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), local_i64);
 
               b.create<func::CallOp>(loc, "rvne_write_ncr", TypeRange{}, ValueRange{val_i32, ncr_off_i32});
             });
@@ -1256,24 +1336,21 @@ struct ONNXLIFOpToKrnlConversion : public OpRewritePattern<ONNXLIFOp> {
                 });
             });
 
-          // ---- read back V_next / I_next from NCR
-          // Support odd calN: each ncr_group2 read returns 2 lanes; guard the last lane.
-          int64_t ncrGroups = (calN + 1) / 2;
+          // ---- read back V_next from NVR and I_next from NCR
+          // Support odd calN: each group2 read returns 2 lanes; guard the last lane.
+          int64_t registerGroups = (calN + 1) / 2;
 
-          buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, ncrGroups),
+          buildKrnlLoop(b0, loc, mkIndex(b0, 0), mkIndex(b0, registerGroups),
             [&](OpBuilder &b, Location loc, Value ig) {
               Value ig_i64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), ig);
               Value ig_i32 = b.create<arith::IndexCastOp>(loc, b.getI32Type(), ig);
 
-              auto rb_V = b.create<func::CallOp>(loc, "rvne_read_ncr_group2",
+              auto rb_V = b.create<func::CallOp>(loc, "rvne_read_nvr_group2",
                                                  TypeRange{b.getI64Type()}, ValueRange{ig_i32});
               Value pair_V = rb_V.getResult(0);
 
-              Value off_I_i64 = b.create<arith::AddIOp>(loc, ig_i64, mkI64(b, ncrGroups));
-              Value off_I_i32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), off_I_i64);
-
               auto rb_I = b.create<func::CallOp>(loc, "rvne_read_ncr_group2",
-                                                 TypeRange{b.getI64Type()}, ValueRange{off_I_i32});
+                                                 TypeRange{b.getI64Type()}, ValueRange{ig_i32});
               Value pair_I = rb_I.getResult(0);
 
               Value cstMask = mkI64(b, 0xFFFFFFFFLL);
@@ -1905,6 +1982,8 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
         });
       });
 
+      configureMultiStepLIFHardware(rewriter, loc, op);
+
       // 6) 时间步循环 it
       buildKrnlLoop(rewriter, loc, mkIndex(0), mkIndex(T),
                     [&](OpBuilder &b, Location l, Value it) {
@@ -1920,7 +1999,7 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
             bb.create<func::CallOp>(lb, "rvne_clear_neuron_data_1024", TypeRange{}, ValueRange{});
 
             // -------------------------
-            // 写入 V：NCR[0..calN-1]
+            // 写入 V：NVR[0..calN-1]
             // -------------------------
             buildKrnlLoop(bb, lb, mkIndex(0), mkIndex(calN),
                           [&](OpBuilder &b2, Location l2, Value ln) {
@@ -1929,14 +2008,14 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
               Value gn_idx = b2.create<arith::IndexCastOp>(l2, b2.getIndexType(), gn_i64);
 
               Value v_val = b2.create<memref::LoadOp>(l2, vcFinalBuf, ValueRange{ib, gn_idx});
-              Value ncr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ln_i64);
+              Value nvr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ln_i64);
 
-              b2.create<func::CallOp>(l2, "rvne_write_ncr", TypeRange{},
-                                      ValueRange{castElemToI32ForNCR(b2, l2, v_val, vcElemTy), ncr_off});
+              b2.create<func::CallOp>(l2, "rvne_write_nvr", TypeRange{},
+                                      ValueRange{castElemToI32ForNCR(b2, l2, v_val, vcElemTy), nvr_off});
             });
 
             // -------------------------
-            // 写入 I+x：NCR[calN..2*calN-1]
+            // 写入 I+x：NCR[0..calN-1]
             // 其中 x 来自 xMem[it, ib, c, h, w] (gn 反解到 CHW)
             // -------------------------
             buildKrnlLoop(bb, lb, mkIndex(0), mkIndex(calN),
@@ -1964,8 +2043,7 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
                                 ? b2.create<arith::AddFOp>(l2, i_old, x_val).getResult()
                                 : b2.create<arith::AddIOp>(l2, i_old, x_val).getResult();
 
-              Value ncr_off_i64 = b2.create<arith::AddIOp>(l2, ln_i64, mkI64(calN));
-              Value ncr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ncr_off_i64);
+              Value ncr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ln_i64);
 
               b2.create<func::CallOp>(l2, "rvne_write_ncr", TypeRange{},
                                       ValueRange{castElemToI32ForNCR(b2, l2, i_new, vcElemTy), ncr_off});
@@ -2023,7 +2101,7 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
             });
 
             // -------------------------
-            // 读回更新后的 V/I (NCR) 并持久化到 vcFinalBuf
+            // 读回更新后的 V (NVR) / I (NCR) 并持久化到 vcFinalBuf
             // -------------------------
             int64_t ncrGroups = (calN + 1) / 2; // ceil(calN/2)
 
@@ -2034,15 +2112,12 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
 
               // 读回 V pair
               auto rb_V = b2.create<func::CallOp>(
-                  l2, "rvne_read_ncr_group2", TypeRange{b2.getI64Type()}, ValueRange{ig_i32});
+                  l2, "rvne_read_nvr_group2", TypeRange{b2.getI64Type()}, ValueRange{ig_i32});
               Value pair_V = rb_V.getResult(0);
 
               // 读回 I pair
-              Value off_I_i64 = b2.create<arith::AddIOp>(l2, ig_i64, mkI64(ncrGroups));
-              Value off_I_i32 = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), off_I_i64);
-
               auto rb_I = b2.create<func::CallOp>(
-                  l2, "rvne_read_ncr_group2", TypeRange{b2.getI64Type()}, ValueRange{off_I_i32});
+                  l2, "rvne_read_ncr_group2", TypeRange{b2.getI64Type()}, ValueRange{ig_i32});
               Value pair_I = rb_I.getResult(0);
 
               // lane 0/1
@@ -2145,6 +2220,8 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
         b.create<memref::StoreOp>(l, val, vcFinalBuf, ValueRange{cst_0idx, i});
       });
 
+      configureMultiStepLIFHardware(rewriter, loc, op);
+
       // 5. 核心：显式时间步 T 维度循环
       buildKrnlLoop(rewriter, loc, cst_0idx, mkIndex(T), [&](OpBuilder &b, Location l, Value it) {
         for (int64_t bi = 0; bi < numBatches; ++bi) {
@@ -2158,9 +2235,9 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
             Value ln_i64 = b2.create<arith::IndexCastOp>(l2, b2.getI64Type(), ln);
             Value gn_idx = b2.create<arith::IndexCastOp>(l2, b2.getIndexType(), b2.create<arith::AddIOp>(l2, ln_i64, mkI64(nStart)));
             Value v_val = b2.create<memref::LoadOp>(l2, vcFinalBuf, ValueRange{cst_0idx, gn_idx});
-            Value ncr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ln_i64); // 正确转换 index->i64->i32
-            b2.create<func::CallOp>(l2, "rvne_write_ncr", TypeRange{}, 
-                                    ValueRange{castElemToI32ForNCR(b2, l2, v_val, vcElemTy), ncr_off});
+            Value nvr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ln_i64); // 正确转换 index->i64->i32
+            b2.create<func::CallOp>(l2, "rvne_write_nvr", TypeRange{},
+                                    ValueRange{castElemToI32ForNCR(b2, l2, v_val, vcElemTy), nvr_off});
           });
 
           // --- 写入 I + x (x 来自当前时间步 it) ---
@@ -2175,7 +2252,7 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
             Value i_new = vcElemTy.isF32() ? b2.create<arith::AddFOp>(l2, i_old, x_val).getResult() 
                                            : b2.create<arith::AddIOp>(l2, i_old, x_val).getResult();
 
-            Value ncr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), b2.create<arith::AddIOp>(l2, ln_i64, mkI64(calN)));
+            Value ncr_off = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ln_i64);
             b2.create<func::CallOp>(l2, "rvne_write_ncr", TypeRange{}, 
                                     ValueRange{castElemToI32ForNCR(b2, l2, i_new, vcElemTy), ncr_off});
           });
@@ -2206,19 +2283,18 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
             });
           });
 
-          // --- 读回更新后的 V/I (NCR) 并持久化到 vcFinalBuf ---
-          int64_t ncrGroups = calN / 2;
-          buildKrnlLoop(b, l, mkIndex(0), mkIndex(ncrGroups), [&](OpBuilder &b2, Location l2, Value ig) {
+          // --- 读回更新后的 V (NVR) / I (NCR) 并持久化到 vcFinalBuf ---
+          int64_t registerGroups = (calN + 1) / 2;
+          buildKrnlLoop(b, l, mkIndex(0), mkIndex(registerGroups), [&](OpBuilder &b2, Location l2, Value ig) {
             Value ig_i64 = b2.create<arith::IndexCastOp>(l2, b2.getI64Type(), ig);
             Value ig_i32 = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), ig_i64);
 
             // 读回 V
-            auto rb_V = b2.create<func::CallOp>(l2, "rvne_read_ncr_group2", TypeRange{b2.getI64Type()}, ValueRange{ig_i32});
+            auto rb_V = b2.create<func::CallOp>(l2, "rvne_read_nvr_group2", TypeRange{b2.getI64Type()}, ValueRange{ig_i32});
             Value pair_V = rb_V.getResult(0);
             
-            // 读回 I (偏移量为 calN/2)
-            Value off_I_i32 = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), b2.create<arith::AddIOp>(l2, ig_i64, mkI64(calN / 2)));
-            auto rb_I = b2.create<func::CallOp>(l2, "rvne_read_ncr_group2", TypeRange{b2.getI64Type()}, ValueRange{off_I_i32});
+            // 读回 I
+            auto rb_I = b2.create<func::CallOp>(l2, "rvne_read_ncr_group2", TypeRange{b2.getI64Type()}, ValueRange{ig_i32});
             Value pair_I = rb_I.getResult(0);
 
             // 解析并存储每一对 (Lo, Hi)
@@ -2228,11 +2304,16 @@ struct ONNXMultiStepLIFToKrnlConversion : public OpRewritePattern<ONNXCustomOp> 
               Value val_I = b2.create<arith::TruncIOp>(l2, b2.getI32Type(), b2.create<arith::AndIOp>(l2, b2.create<arith::ShRUIOp>(l2, pair_I, bitOff), cst_mask32_i64));
 
               Value l_idx = b2.create<arith::AddIOp>(l2, b2.create<arith::MulIOp>(l2, ig_i64, mkI64(2)), mkI64(i));
+              Value inBounds = b2.create<arith::CmpIOp>(
+                  l2, arith::CmpIPredicate::ult, l_idx, mkI64(calN));
               Value gn_V = b2.create<arith::IndexCastOp>(l2, b2.getIndexType(), b2.create<arith::AddIOp>(l2, l_idx, mkI64(nStart)));
               Value gn_I = b2.create<arith::IndexCastOp>(l2, b2.getIndexType(), b2.create<arith::AddIOp>(l2, l_idx, mkI64(N + nStart)));
 
-              b2.create<memref::StoreOp>(l2, castI32FromNCRToElemTy(b2, l2, val_V, vcElemTy), vcFinalBuf, ValueRange{cst_0idx, gn_V});
-              b2.create<memref::StoreOp>(l2, castI32FromNCRToElemTy(b2, l2, val_I, vcElemTy), vcFinalBuf, ValueRange{cst_0idx, gn_I});
+              b2.create<scf::IfOp>(l2, inBounds, [&](OpBuilder &b3, Location l3) {
+                b3.create<memref::StoreOp>(l3, castI32FromNCRToElemTy(b3, l3, val_V, vcElemTy), vcFinalBuf, ValueRange{cst_0idx, gn_V});
+                b3.create<memref::StoreOp>(l3, castI32FromNCRToElemTy(b3, l3, val_I, vcElemTy), vcFinalBuf, ValueRange{cst_0idx, gn_I});
+                b3.create<scf::YieldOp>(l3);
+              });
             }
           });
         }
