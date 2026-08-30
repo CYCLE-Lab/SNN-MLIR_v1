@@ -114,12 +114,71 @@ LogicalResult ONNXSNNFCOp::inferShapes(
 
 LogicalResult ONNXSConvOp::inferShapes(
     std::function<void(Region &)> doShapeInference) {
-  // Reuse Conv shape helper logic.
   if (!hasShapeAndRank(getX()) || !hasShapeAndRank(getW()))
     return success();
-  Type elementType = getElementType(getX().getType());
-  ONNXConvOpShapeHelper shapeHelper(getOperation(), {});
-  return shapeHelper.computeShapeAndUpdateType(elementType);
+
+  // ONNXConvOpShapeHelper cannot be reused here: its computeShape()
+  // specialization unconditionally casts the operation to ONNXConvOp.  SConv
+  // has the same spatial formula but is a distinct operation class.
+  auto xTy = dyn_cast<RankedTensorType>(getX().getType());
+  auto wTy = dyn_cast<RankedTensorType>(getW().getType());
+  if (!xTy || !wTy)
+    return success();
+  if (xTy.getRank() != wTy.getRank() || xTy.getRank() < 3)
+    return emitError("SConv input and weight must have equal rank >= 3");
+
+  const int64_t spatialRank = xTy.getRank() - 2;
+  auto kernelShape = getKernelShape();
+  auto pads = getPads();
+  auto strides = getStrides();
+  auto dilations = getDilations();
+  if (kernelShape && static_cast<int64_t>(kernelShape->size()) != spatialRank)
+    return emitError("SConv kernel_shape rank mismatch");
+  if (pads && static_cast<int64_t>(pads->size()) != 2 * spatialRank)
+    return emitError("SConv pads rank mismatch");
+  if (strides && static_cast<int64_t>(strides->size()) != spatialRank)
+    return emitError("SConv strides rank mismatch");
+  if (dilations && static_cast<int64_t>(dilations->size()) != spatialRank)
+    return emitError("SConv dilations rank mismatch");
+  if (getAutoPad() != "NOTSET" && getAutoPad() != "VALID")
+    return emitError("SConv shape inference supports NOTSET or VALID auto_pad");
+
+  auto attrValue = [](std::optional<ArrayAttr> attr, int64_t index,
+                       int64_t defaultValue) {
+    if (!attr)
+      return defaultValue;
+    return cast<IntegerAttr>((*attr)[index]).getInt();
+  };
+
+  SmallVector<int64_t, 4> outputShape;
+  outputShape.emplace_back(xTy.getDimSize(0));
+  outputShape.emplace_back(wTy.getDimSize(0));
+  for (int64_t i = 0; i < spatialRank; ++i) {
+    const int64_t input = xTy.getDimSize(i + 2);
+    const int64_t kernel = kernelShape
+                               ? attrValue(kernelShape, i, 0)
+                               : wTy.getDimSize(i + 2);
+    const int64_t stride = attrValue(strides, i, 1);
+    const int64_t dilation = attrValue(dilations, i, 1);
+    const int64_t padBegin = getAutoPad() == "VALID"
+                                 ? 0
+                                 : attrValue(pads, i, 0);
+    const int64_t padEnd = getAutoPad() == "VALID"
+                               ? 0
+                               : attrValue(pads, i + spatialRank, 0);
+    if (stride <= 0 || dilation <= 0 || kernel <= 0)
+      return emitError("SConv kernel, stride, and dilation must be positive");
+    if (ShapedType::isDynamic(input) || ShapedType::isDynamic(kernel)) {
+      outputShape.emplace_back(ShapedType::kDynamic);
+      continue;
+    }
+    const int64_t effectiveKernel = dilation * (kernel - 1) + 1;
+    outputShape.emplace_back(
+        (input + padBegin + padEnd - effectiveKernel) / stride + 1);
+  }
+
+  updateType(getOperation(), getY(), outputShape, xTy.getElementType());
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
