@@ -416,7 +416,9 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // target.addLegalOp<ONNXGemmOp>(); // modified by p
     // target.addLegalOp<ONNXFlattenOp>(); // modified by p (SqueezeNet needed)
     // target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
-    target.addLegalOp<ONNXAveragePoolOp>(); // modified by p
+    // target.addLegalOp<ONNXAveragePoolOp>(); // modified by p
+    // AveragePool must be lowered to Krnl: leaving the ONNX op in the graph
+    // makes the later SNN/EmitC passes fail with an unregistered dialect.
     // target.addLegalOp<ONNXGatherOp>(); // modified by p (BERT needs this)
     // target.addLegalOp<ONNXReduceMeanV13Op>(); // modified by p (BERT fusion needs this)
     target.addLegalOp<ONNXReduceSumV11Op>(); // modified by p (BERT fusion needs this)
